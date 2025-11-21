@@ -11,8 +11,10 @@ export interface RepoDetails {
 
 export class GitContextManager {
     private gitApi: any;
+    private outputChannel: vscode.OutputChannel;
 
-    constructor() {
+    constructor(outputChannel: vscode.OutputChannel) {
+        this.outputChannel = outputChannel;
         // Consume the built-in Git extension API
         const extension = vscode.extensions.getExtension<GitExtension>('vscode.git');
         if (!extension) throw new Error("Git extension not enabled.");
@@ -60,29 +62,65 @@ export class GitContextManager {
 
     // The Auto-Sync Logic
     async pushWipChanges(repo: Repository): Promise<void> {
-        // 1. Stage all changes
-        await repo.add([]); // Empty array adds all tracked files usually, or use '.' if supported by the API wrapper, but typically add([]) stages all changes in VS Code API.
-        // Actually, looking at VS Code API, add(resources) takes URIs. If we want to stage all, we might need to pass all URIs or look for a stageAll equivalent.
-        // However, the guide says `repo.add()`. Let's stick to what the guide implies or use a safe default.
-        // The guide says `repo.add('. ')` in the text but `repo.add()` in the code block.
-        // In VS Code Git API, `add` takes an array of URIs. To stage all, we usually call `repository.inputBox.value = ''` and then commit, or use the `stage` command.
-        // But `repository.add(uris)` is the method.
-        // Let's assume for now that passing nothing or an empty array might not work as "stage all" without checking the specific API version behavior, 
-        // but the guide code `repo.add()` suggests it might have a default or the author intended to stage all.
-        // Let's try to find all changed resources and pass them.
+        this.outputChannel.appendLine("Starting pushWipChanges...");
 
-        const changes = [...repo.state.workingTreeChanges, ...repo.state.indexChanges];
-        const uris = changes.map(c => c.uri);
-        if (uris.length > 0) {
-            await repo.add(uris);
+        try {
+            // 1. Stage all changes
+            // Only stage working tree changes, not already-staged index changes
+            const workingTreeChanges = repo.state.workingTreeChanges;
+            this.outputChannel.appendLine(`Found ${workingTreeChanges.length} working tree changes.`);
+
+            if (workingTreeChanges.length > 0) {
+                this.outputChannel.appendLine("Staging changes...");
+
+                // Use empty array to stage all changes - this is more reliable in WSL
+                // than passing individual URIs which can have path conversion issues
+                try {
+                    await repo.add([]);
+                    this.outputChannel.appendLine("Successfully staged all changes.");
+                } catch (addError) {
+                    // Fallback: try staging individual files if batch staging fails
+                    this.outputChannel.appendLine(`Batch staging failed, trying individual files: ${addError}`);
+                    const uris = workingTreeChanges.map(c => c.uri);
+                    for (const uri of uris) {
+                        try {
+                            this.outputChannel.appendLine(`Staging: ${uri.fsPath}`);
+                            await repo.add([uri]);
+                        } catch (fileError) {
+                            this.outputChannel.appendLine(`Failed to stage ${uri.fsPath}: ${fileError}`);
+                            throw fileError;
+                        }
+                    }
+                }
+            } else if (repo.state.indexChanges.length === 0) {
+                this.outputChannel.appendLine("No changes to stage or commit.");
+                return;
+            }
+
+            // 2. Commit with standardized message
+            const timestamp = new Date().toISOString();
+            const message = `WIP: Auto-save for Jules Handover [${timestamp}]`;
+            this.outputChannel.appendLine(`Committing with message: ${message}`);
+            await repo.commit(message);
+            this.outputChannel.appendLine("Commit successful.");
+
+            // 3. Create and push to a new unique branch
+            const remoteName = repo.state.remotes[0]?.name || 'origin';
+            const branchSafeTimestamp = timestamp.replace(/[:.]/g, '-');
+            const newBranchName = `wip-jules-${branchSafeTimestamp}`;
+
+            this.outputChannel.appendLine(`Creating and pushing to new branch: ${remoteName}/${newBranchName}...`);
+
+            // Create and checkout new branch
+            await repo.createBranch(newBranchName, true);
+
+            // Push the new branch to remote with upstream tracking
+            await repo.push(remoteName, newBranchName, true);
+            this.outputChannel.appendLine("Push complete.");
+        } catch (error) {
+            this.outputChannel.appendLine(`Error in pushWipChanges: ${error}`);
+            throw error;
         }
-
-        // 2. Commit with standardized message
-        const timestamp = new Date().toISOString();
-        await repo.commit(`WIP: Auto-save for Jules Handover [${timestamp}]`);
-
-        // 3. Push to upstream
-        await repo.push();
     }
 
     // Regex Parser for SSH/HTTPS URLs

@@ -6,8 +6,13 @@ import { SecretsManager } from './secrets';
 let statusBarItem: vscode.StatusBarItem;
 
 export async function activate(context: vscode.ExtensionContext) {
+    // Initialize Output Channel
+    const outputChannel = vscode.window.createOutputChannel("Jules Bridge");
+    context.subscriptions.push(outputChannel);
+    outputChannel.appendLine("Jules Bridge Extension Activated");
+
     const secrets = new SecretsManager(context);
-    const gitManager = new GitContextManager();
+    const gitManager = new GitContextManager(outputChannel);
     const julesClient = new JulesClient(secrets);
 
     // Initialize UI
@@ -25,6 +30,8 @@ export async function activate(context: vscode.ExtensionContext) {
     // Command: Send Flow (The Main Logic)
     context.subscriptions.push(vscode.commands.registerCommand('julesBridge.sendFlow', async () => {
         try {
+            outputChannel.appendLine("Command 'sendFlow' triggered");
+
             // 1. Validate Git State
             const repoDetails = await gitManager.getRepositoryDetails();
             if (!repoDetails) {
@@ -90,6 +97,8 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
         } catch (error: any) {
+            outputChannel.appendLine(`Error: ${error.message}`);
+            if (error.stack) outputChannel.appendLine(error.stack);
             vscode.window.showErrorMessage(`Jules Handoff Failed: ${error.message}`);
         } finally {
             statusBarItem.text = '$(rocket) Send to Jules';

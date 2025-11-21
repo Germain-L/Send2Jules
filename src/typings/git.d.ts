@@ -13,7 +13,9 @@ export interface Repository {
     state: RepositoryState;
     add(resources?: vscode.Uri[]): Promise<void>;
     commit(message: string): Promise<void>;
-    push(remoteName?: string, branchName?: string): Promise<void>;
+    push(remoteName?: string, branchName?: string, setUpstream?: boolean): Promise<void>;
+    createBranch(name: string, checkout: boolean, ref?: string): Promise<void>;
+    checkout(treeish: string): Promise<void>;
 }
 
 export interface RepositoryState {
