@@ -1,0 +1,49 @@
+{
+    "name": "antigravity-jules-bridge",
+    "displayName": "Antigravity Jules Bridge",
+    "description": "Asynchronous handoff extension to send current flow to Jules Agent.",
+    "version": "1.0.0",
+    "publisher": "enterprise-integration",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "workspaceContains:.git"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "julesBridge.sendFlow",
+                "title": "Send to Jules"
+            },
+            {
+                "command": "julesBridge.setApiKey",
+                "title": "Set Jules API Key"
+            }
+        ],
+        "configuration": {
+            "title": "Jules Bridge",
+            "properties": {
+                "julesBridge.autoPush": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically commit and push WIP changes before sending to Jules."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.80.0",
+        "@types/node": "18.x",
+        "typescript": "^5.1.3"
+    }
+}
