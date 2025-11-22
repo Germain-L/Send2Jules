@@ -58,11 +58,22 @@
     "scripts": {
         "vscode:prepublish": "npm run compile",
         "compile": "tsc -p ./",
-        "watch": "tsc -watch -p ./"
+        "watch": "tsc -watch -p ./",
+        "test": "npm run compile && node ./out/test/runTest.js",
+        "test:unit": "npm run compile && mocha --ui tdd --require ./out/test/unit-tests-runner.js ./out/test/suite/validators.test.js ./out/test/suite/promptGenerator.test.js ./out/test/suite/gitContext.test.js"
     },
     "devDependencies": {
+        "@types/glob": "^8.1.0",
+        "@types/mocha": "^10.0.1",
         "@types/node": "18.x",
         "@types/vscode": "^1.80.0",
+        "@vscode/test-electron": "^2.3.3",
+        "glob": "^8.1.0",
+        "mocha": "^10.2.0",
+        "mock-require": "^3.0.3",
+        "@types/mock-require": "^2.0.0",
+        "sinon": "^15.2.0",
+        "@types/sinon": "^10.0.15",
         "typescript": "^5.1.3"
     }
 }
