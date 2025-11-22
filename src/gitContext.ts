@@ -20,7 +20,9 @@
  */
 
 import * as vscode from 'vscode';
-import { GitExtension, Repository } from './typings/git';
+import { GitExtension, Repository, API as GitAPI } from './typings/git';
+import { GIT_CONFIG, MESSAGES } from './constants';
+import { GitError } from './errors';
 
 /**
  * Repository details extracted from Git state and remote configuration.
@@ -45,7 +47,7 @@ export interface RepoDetails {
  * Uses VS Code's built-in Git extension API to interact with repositories.
  */
 export class GitContextManager {
-    private gitApi: any;
+    private gitApi: GitAPI;
     private outputChannel: vscode.OutputChannel;
 
     /**
@@ -86,13 +88,13 @@ export class GitContextManager {
      * }
      * ```
      */
-    async getRepositoryDetails(): Promise<RepoDetails | null> {
+    async getRepositoryDetails(): Promise<RepoDetails | undefined> {
         let repo: Repository | undefined;
 
         // 1. Try to get repo from active file
         if (vscode.window.activeTextEditor) {
             const uri = vscode.window.activeTextEditor.document.uri;
-            repo = this.gitApi.getRepository(uri);
+            repo = this.gitApi.getRepository(uri) || undefined;
         }
 
         // 2. Fallback: Try to get repo from workspace folders
@@ -106,10 +108,10 @@ export class GitContextManager {
             }
         }
 
-        if (!repo) return null;
+        if (!repo) return undefined;
 
         const remoteUrl = repo.state.remotes[0]?.fetchUrl;
-        if (!remoteUrl) throw new Error("No remote configured for this repository.");
+        if (!remoteUrl) throw new GitError(MESSAGES.NO_REMOTE, 'getRemoteUrl');
 
         const { owner, name } = this.parseGithubUrl(remoteUrl);
 
@@ -120,7 +122,7 @@ export class GitContextManager {
             repo,
             owner,
             name,
-            branch: repo.state.HEAD?.name || 'main',
+            branch: repo.state.HEAD?.name || GIT_CONFIG.DEFAULT_BRANCH,
             isDirty
         };
     }
@@ -185,15 +187,15 @@ export class GitContextManager {
 
             // 2. Commit with standardized message
             const timestamp = new Date().toISOString();
-            const message = `WIP: Auto-save for Jules Handover [${timestamp}]`;
+            const message = GIT_CONFIG.WIP_COMMIT_MESSAGE(timestamp);
             this.outputChannel.appendLine(`Committing with message: ${message}`);
             await repo.commit(message);
             this.outputChannel.appendLine("Commit successful.");
 
             // 3. Create and push to a new unique branch
             const remoteName = repo.state.remotes[0]?.name || 'origin';
-            const branchSafeTimestamp = timestamp.replace(/[:.]/g, '-');
-            const newBranchName = `wip-jules-${branchSafeTimestamp}`;
+            const branchSafeTimestamp = timestamp.replace(GIT_CONFIG.BRANCH_SAFE_CHARS_PATTERN, GIT_CONFIG.BRANCH_SAFE_REPLACEMENT);
+            const newBranchName = GIT_CONFIG.WIP_BRANCH_NAME(branchSafeTimestamp);
 
             this.outputChannel.appendLine(`Creating and pushing to new branch: ${remoteName}/${newBranchName}...`);
 
@@ -203,10 +205,39 @@ export class GitContextManager {
             // Push the new branch to remote with upstream tracking
             await repo.push(remoteName, newBranchName, true);
             this.outputChannel.appendLine("Push complete.");
-        } catch (error) {
+        } catch (error: any) {
             this.outputChannel.appendLine(`Error in pushWipChanges: ${error}`);
-            throw error;
+
+            // Provide user-friendly error messages for common Git errors
+            const errorMessage = this.parseGitError(error);
+            throw new GitError(errorMessage, 'pushWipChanges', error.message);
         }
+    }
+
+    /**
+     * Parse Git errors and provide user-friendly messages.
+     * 
+     * @param error - The error from Git operations
+     * @returns User-friendly error message
+     * @private
+     */
+    private parseGitError(error: any): string {
+        const errorStr = error.message || error.toString();
+
+        if (errorStr.includes('network') || errorStr.includes('Could not resolve host')) {
+            return 'Git push failed: No network connection. Please check your internet connection.';
+        }
+
+        if (errorStr.includes('permission denied') || errorStr.includes('authentication failed')) {
+            return 'Git push failed: Authentication error. Please check your Git credentials.';
+        }
+
+        if (errorStr.includes('rejected') || errorStr.includes('non-fast-forward')) {
+            return 'Git push failed: Remote has changes. Please pull the latest changes first.';
+        }
+
+        // Generic message
+        return `Git operation failed: ${errorStr.substring(0, 100)}`;
     }
 
     /**

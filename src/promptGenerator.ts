@@ -22,6 +22,9 @@ import * as vscode from 'vscode';
 import { Repository } from './typings/git';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
+import { validatePathInBrainDirectory } from './validators';
+import { CODE_ANALYSIS, GitStatus, PATHS, LOG_PREFIX } from './constants';
 
 /**
  * Summary of Git repository changes including modified, added, and deleted files.
@@ -70,10 +73,10 @@ export class PromptGenerator {
      */
     async getAvailableContexts(): Promise<{ name: string; title: string; path: string; time: number }[]> {
         try {
-            const homeDir = process.env.HOME || process.env.USERPROFILE;
+            const homeDir = os.homedir();
             if (!homeDir) return [];
 
-            const brainDir = path.join(homeDir, '.gemini', 'antigravity', 'brain');
+            const brainDir = path.join(homeDir, ...PATHS.BRAIN_PATH_SEGMENTS);
             try {
                 await fs.access(brainDir);
             } catch {
@@ -83,6 +86,121 @@ export class PromptGenerator {
             const entries = await fs.readdir(brainDir, { withFileTypes: true });
             const dirs = entries.filter(e => e.isDirectory());
 
+            // PERFORMANCE: Load metadata in parallel with Promise.allSettled
+            const contexts = await Promise.allSettled(
+                dirs.map(d => this.loadContextMetadata(brainDir, d.name))
+            );
+
+            // Filter out failed loads and extract values
+            const validContexts = contexts
+                .filter((result): result is PromiseFulfilledResult<{ name: string; title: string; path: string; time: number }> =>
+                    result.status === 'fulfilled'
+                )
+                .map(result => result.value);
+
+            return validContexts.sort((a, b) => b.time - a.time);
+        } catch (error) {
+            this.outputChannel.appendLine(`Error listing contexts: ${error}`);
+            return [];
+        }
+    }
+
+    /**
+     * Load metadata for a single context directory
+     * @private
+     */
+    private async loadContextMetadata(
+        brainDir: string,
+        dirName: string
+    ): Promise<{ name: string; title: string; path: string; time: number }> {
+        const fullPath = path.join(brainDir, dirName);
+        const stats = await fs.stat(fullPath);
+
+        // Try to extract title from artifacts
+        const title = await this.extractContextTitle(fullPath, dirName);
+
+        return {
+            name: dirName,
+            title: title,
+            path: fullPath,
+            time: stats.mtimeMs
+        };
+    }
+
+    /**
+     * Extract human-readable title from context artifacts
+     * @private
+     */
+    private async extractContextTitle(contextPath: string, fallbackName: string): Promise<string> {
+        // Try task.md first
+        const title = await this.tryExtractTitleFromFile(
+            path.join(contextPath, 'task.md')
+        );
+        if (title) return title;
+
+        // Fallback to implementation_plan.md
+        const planTitle = await this.tryExtractTitleFromFile(
+            path.join(contextPath, 'implementation_plan.md')
+        );
+        if (planTitle) return planTitle;
+
+        // Final fallback to directory name
+        return fallbackName;
+    }
+
+    /**
+     * Try to extract title from a markdown file
+     * PERFORMANCE: Only reads first 1KB to avoid loading large files
+     * @private
+     */
+    private async tryExtractTitleFromFile(filePath: string): Promise<string | null> {
+        try {
+            // PERFORMANCE: Read only first 1KB to find the title
+            const fileHandle = await fs.open(filePath, 'r');
+            const buffer = Buffer.alloc(CODE_ANALYSIS.TITLE_READ_SIZE);
+            await fileHandle.read(buffer, 0, CODE_ANALYSIS.TITLE_READ_SIZE, 0);
+            await fileHandle.close();
+
+            const content = buffer.toString('utf-8');
+            const lines = content.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('# ')) {
+                    const candidate = line.substring(2).trim();
+                    // Skip generic titles
+                    if (candidate && !['Tasks', 'Task', 'Implementation Plan'].includes(candidate)) {
+                        return candidate;
+                    }
+                }
+            }
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * DEPRECATED: Old implementation replaced by optimized version above.
+     * Load all context metadata sequentially (slower).
+     * @private
+     * @deprecated Use Promise.allSettled approach instead
+     */
+    private async OLD_getAvailableContextsSequential() {
+        try {
+            const homeDir = os.homedir();
+            if (!homeDir) return [];
+
+            const brainDir = path.join(homeDir, ...PATHS.BRAIN_PATH_SEGMENTS);
+            try {
+                await fs.access(brainDir);
+            } catch {
+                return [];
+            }
+
+            const entries = await fs.readdir(brainDir, { withFileTypes: true });
+            const dirs = entries.filter(e => e.isDirectory());
+
+            // OLD APPROACH: Sequential loading (N+1 problem)
             const contexts = await Promise.all(dirs.map(async (d) => {
                 const fullPath = path.join(brainDir, d.name);
                 const stats = await fs.stat(fullPath);
@@ -243,14 +361,13 @@ export class PromptGenerator {
             const fileName = this.getFileName(change.uri);
 
             // Determine change type based on status
-            // Status: 0=INDEX_MODIFIED, 1=INDEX_ADDED, 2=INDEX_DELETED, etc.
             const status = change.status;
 
-            if (status === 6 || status === 7) { // Deleted or TYPE_CHANGE
+            if (status === GitStatus.DELETED || status === GitStatus.TYPE_CHANGE) {
                 if (!deletedFiles.includes(fileName)) {
                     deletedFiles.push(fileName);
                 }
-            } else if (status === 1 || status === 3) { // Added or UNTRACKED
+            } else if (status === GitStatus.INDEX_ADDED || status === GitStatus.UNTRACKED) {
                 if (!addedFiles.includes(fileName)) {
                     addedFiles.push(fileName);
                 }
@@ -384,7 +501,8 @@ export class PromptGenerator {
                     const matchStart = match.index;
                     const matchEnd = pattern.lastIndex;
 
-                    if (matchStart <= offset && offset <= matchEnd + 200) { // Within ~200 chars of definition
+                    // Within symbol context radius
+                    if (matchStart <= offset && offset <= matchEnd + CODE_ANALYSIS.SYMBOL_CONTEXT_RADIUS) {
                         const name = match[1] || match[2];
                         if (name) {
                             // Determine if it's a function or class
@@ -416,12 +534,11 @@ export class PromptGenerator {
      * @private
      */
     private isArtifactFile(uri: vscode.Uri): boolean {
-        const path = uri.fsPath;
+        const filePath = uri.fsPath;
         const isArtifact = (
-            path.includes('/.gemini/antigravity/brain/') &&
-            (path.endsWith('/task.md') || path.endsWith('/implementation_plan.md'))
+            filePath.includes(path.sep + path.join(...PATHS.BRAIN_PATH_SEGMENTS) + path.sep) &&
+            PATHS.ARTIFACTS.some(artifact => filePath.endsWith(path.sep + artifact))
         );
-        this.outputChannel.appendLine(`[DEBUG] isArtifactFile check: ${path} -> ${isArtifact}`);
         return isArtifact;
     }
 
@@ -518,7 +635,7 @@ export class PromptGenerator {
 
             // Include regular files list
             if (regularFiles.length > 0) {
-                const fileList = regularFiles.slice(0, 5).join(', ');
+                const fileList = regularFiles.slice(0, CODE_ANALYSIS.MAX_FILES_IN_PROMPT).join(', ');
                 parts.push(`Other open files: ${fileList}`);
             }
 
@@ -551,20 +668,49 @@ export class PromptGenerator {
                 targetDir = contexts[0].path;
             }
 
-            const artifacts: { name: string; content: string; path: string }[] = [];
-            const filesToLookFor = ['task.md', 'implementation_plan.md'];
+            // SECURITY: Validate that targetDir is within the brain directory
+            const homeDir = os.homedir();
+            if (!homeDir) {
+                this.outputChannel.appendLine(`${LOG_PREFIX.SECURITY} Could not determine home directory`);
+                return [];
+            }
 
-            for (const fileName of filesToLookFor) {
-                const filePath = path.join(targetDir!, fileName);
+            const brainDir = path.join(homeDir, ...PATHS.BRAIN_PATH_SEGMENTS);
+            const resolvedBrainDir = path.resolve(brainDir);
+
+            // SECURITY: Prevent path traversal attacks
+            try {
+                validatePathInBrainDirectory(targetDir, resolvedBrainDir);
+            } catch (error) {
+                this.outputChannel.appendLine(`${LOG_PREFIX.SECURITY} Path validation failed: ${error}`);
+                return [];
+            }
+
+            const artifacts: { name: string; content: string; path: string }[] = [];
+
+            for (const fileName of PATHS.ARTIFACTS) {
+                const filePath = path.join(targetDir, fileName);
+
+                // SECURITY: Double-check resolved path is still within brain directory
                 try {
-                    await fs.access(filePath);
+                    validatePathInBrainDirectory(filePath, resolvedBrainDir);
+                } catch (error) {
+                    this.outputChannel.appendLine(`${LOG_PREFIX.SECURITY} File path outside brain directory: ${filePath}`);
+                    continue;
+                }
+
+                try {
+                    await fs.access(filePath, fs.constants.R_OK);
                     const uri = vscode.Uri.file(filePath);
                     const content = await this.readArtifactFile(uri, fileName);
                     if (content) {
                         artifacts.push({ name: fileName, content, path: filePath });
                     }
-                } catch {
-                    // File doesn't exist, skip
+                } catch (error: any) {
+                    // File doesn't exist or not readable - this is expected, skip
+                    if (error.code !== 'ENOENT' && error.code !== 'EACCES') {
+                        this.outputChannel.appendLine(`Unexpected error accessing ${fileName}: ${error.code}`);
+                    }
                 }
             }
 
