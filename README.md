@@ -38,10 +38,10 @@ A VS Code extension that enables seamless handoff of development work to the [Ju
    - Download from [Antigravity](https://antigravity.google/)
    - Will not activate in regular VS Code
 2. **Git**: A workspace with a Git repository
-3. **Jules API Access**: 
+3. **Jules API Access**:
    - A Google Cloud Project with Jules API enabled
    - Jules API Key ([Get one here](https://jules.google.com/settings))
-4. **GitHub Integration**: 
+4. **GitHub Integration**:
    - Jules GitHub App installed for your repositories ([Configure here](https://jules.google.com/))
 
 ### Install Extension
@@ -171,10 +171,10 @@ Other open files: utils.ts, constants.ts, api.ts
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
 | gitContext.ts|  |promptGenera- |  | julesClient  |  | secrets.ts   |
 |              |  | tor.ts       |  | .ts          |  |              |
-| - Git repo   |  | - Context    |  | - API calls  |  | - Secure key |
-|   detection  |  |   analysis   |  | - Session    |  |   storage    |
-| - WIP commits|  | - Artifact   |  |   creation   |  | - Keychain   |
-| - URL parsing|  |   reading    |  | - Error      |  |   integration|
+| - Git repo   |  | - Context    |  | - API calls  |  | - Session    |
+|   detection  |  |   analysis   |  | - Session    |  |   creation   |
+| - WIP commits|  | - Artifact   |  |   reading    |  | - Error      |
+| - URL parsing|  |   reading    |  | - Error      |  |   handling   |
 └──────────────┘  | - Prompt gen |  |   handling   |  └──────────────┘
                   └──────────────┘  └──────────────┘
 ```
@@ -293,8 +293,8 @@ Send2Jules/
 ## 🐛 Troubleshooting
 
 ### "This extension requires the Antigravity IDE"
-**Cause**: The extension detected that it's running in regular VS Code instead of Antigravity IDE.  
-**Solution**: 
+**Cause**: The extension detected that it's running in regular VS Code instead of Antigravity IDE.
+**Solution**:
 1. Download and install [Antigravity IDE](https://deepmind.google/technologies/antigravity/)
 2. Open your project in Antigravity IDE instead of VS Code
 3. The extension will automatically activate in Antigravity
@@ -305,25 +305,25 @@ Send2Jules/
 - Integration with Antigravity's task management system
 
 ### "Open a file in a Git repository to use Jules"
-**Cause**: No Git repository detected in the workspace.  
+**Cause**: No Git repository detected in the workspace.
 **Solution**: Open a folder that contains a `.git` directory.
 
 ### "Jules does not have access to owner/repo"
-**Cause**: The repository is not initialized in Jules.  
+**Cause**: The repository is not initialized in Jules.
 **Solution**:
 1. Visit [Jules Repository Settings](https://jules.google.com/settings/repositories)
 2. Install and configure the Jules GitHub App for your repository
 3. Grant necessary permissions
 
 ### "API Error 401: Unauthorized"
-**Cause**: Invalid or missing API key.  
+**Cause**: Invalid or missing API key.
 **Solution**:
 1. Run `Jules Bridge: Set Jules API Key` command
 2. Enter a valid API key from [Jules Settings](https://jules.google.com/settings)
 3. Verify your Google Cloud Project has Jules API enabled
 
 ### "No remote configured for this repository"
-**Cause**: The Git repository doesn't have a remote named "origin".  
+**Cause**: The Git repository doesn't have a remote named "origin".
 **Solution**:
 ```bash
 git remote add origin git@github.com:username/repo.git
@@ -332,7 +332,7 @@ git remote add origin https://github.com/username/repo.git
 ```
 
 ### Auto-generated prompt is too generic
-**Cause**: Not enough context available (no uncommitted changes, artifacts not open, etc.).  
+**Cause**: Not enough context available (no uncommitted changes, artifacts not open, etc.).
 **Solution**:
 - Open relevant `task.md` or `implementation_plan.md` files from `~/.gemini/antigravity/brain/`
 - Make some uncommitted changes to provide diff context
@@ -340,7 +340,7 @@ git remote add origin https://github.com/username/repo.git
 - Manually edit the prompt to add more specificity
 
 ### Conversation context picker is empty
-**Cause**: No Antigravity agent conversations found in `~/.gemini/antigravity/brain/`.  
+**Cause**: No Antigravity agent conversations found in `~/.gemini/antigravity/brain/`.
 **Solution**: This is expected if you haven't used Antigravity agent before. The extension will still work but won't have artifact context.
 
 ## 🔐 Privacy & Security
@@ -349,7 +349,7 @@ git remote add origin https://github.com/username/repo.git
 - API keys are stored using VS Code's `SecretStorage` API
 - Backed by OS-level encryption:
   - **macOS**: Keychain
-  - **Windows**: Credential Manager  
+  - **Windows**: Credential Manager
   - **Linux**: Secret Service API (gnome-keyring/kwallet)
 - Never stored in plain text configuration files
 - Not synced via VS Code Settings Sync
@@ -368,7 +368,7 @@ The extension requires:
 
 ## 📄 License
 
-[Your License Here]
+Apache License 2.0
 
 ## 🤝 Contributing
 
