@@ -20,7 +20,98 @@ export class PromptGenerator {
     /**
      * Generate an intelligent prompt based on current workspace context
      */
-    async generatePrompt(repo: Repository, activeEditor?: vscode.TextEditor): Promise<string> {
+    /**
+     * Get list of available conversation contexts from the brain directory
+     */
+    /**
+     * Get list of available conversation contexts from the brain directory
+     */
+    async getAvailableContexts(): Promise<{ name: string; title: string; path: string; time: number }[]> {
+        try {
+            const homeDir = process.env.HOME || process.env.USERPROFILE;
+            if (!homeDir) return [];
+
+            const brainDir = path.join(homeDir, '.gemini', 'antigravity', 'brain');
+            try {
+                await fs.access(brainDir);
+            } catch {
+                return [];
+            }
+
+            const entries = await fs.readdir(brainDir, { withFileTypes: true });
+            const dirs = entries.filter(e => e.isDirectory());
+
+            const contexts = await Promise.all(dirs.map(async (d) => {
+                const fullPath = path.join(brainDir, d.name);
+                const stats = await fs.stat(fullPath);
+
+                // Try to read task.md for title
+                let title = d.name; // Default to ID
+                let foundTitle = false;
+
+                try {
+                    const taskPath = path.join(fullPath, 'task.md');
+                    const content = await fs.readFile(taskPath, 'utf-8');
+
+                    // Strategy 1: Look for "Task Name:" in content (if stored in text)
+                    // Strategy 2: Look for the first H1 header
+                    const lines = content.split('\n');
+                    for (const line of lines) {
+                        if (line.startsWith('# ')) {
+                            const candidate = line.substring(2).trim();
+                            if (candidate && candidate.toLowerCase() !== 'tasks') {
+                                title = candidate;
+                                foundTitle = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Strategy 3: If H1 is generic "Tasks", look for sub-headers or active task
+                    if (!foundTitle || title === 'Tasks') {
+                        // Try to find a meaningful sub-task or the first non-checked item
+                        // But for now, let's stick to the implementation plan title if task.md is generic
+                        foundTitle = false;
+                    }
+                } catch {
+                    // Ignore error
+                }
+
+                // Fallback to implementation_plan.md if no title found in task.md
+                if (!foundTitle) {
+                    try {
+                        const planPath = path.join(fullPath, 'implementation_plan.md');
+                        const content = await fs.readFile(planPath, 'utf-8');
+                        const firstLine = content.split('\n')[0];
+                        if (firstLine.startsWith('# ')) {
+                            title = firstLine.substring(2).trim();
+                        } else if (firstLine.startsWith('#')) {
+                            title = firstLine.substring(1).trim();
+                        }
+                    } catch {
+                        // Ignore error
+                    }
+                }
+
+                return {
+                    name: d.name,
+                    title: title,
+                    path: fullPath,
+                    time: stats.mtimeMs
+                };
+            }));
+
+            return contexts.sort((a, b) => b.time - a.time);
+        } catch (error) {
+            this.outputChannel.appendLine(`Error listing contexts: ${error}`);
+            return [];
+        }
+    }
+
+    /**
+     * Generate an intelligent prompt based on current workspace context
+     */
+    async generatePrompt(repo: Repository, activeEditor?: vscode.TextEditor, contextPath?: string): Promise<string> {
         try {
             const parts: string[] = [];
 
@@ -39,7 +130,8 @@ export class PromptGenerator {
             }
 
             // 3. Collect open files and artifact content
-            const openFilesContext = await this.getOpenFilesContext();
+            // If contextPath is provided, use it. Otherwise, it will default to auto-discovery.
+            const openFilesContext = await this.getOpenFilesContext(contextPath);
             if (openFilesContext) {
                 parts.push(openFilesContext);
             }
@@ -206,81 +298,6 @@ export class PromptGenerator {
     }
 
     /**
-     * Get list of open files and include artifact content
-     */
-    /**
-     * Get list of open files and include artifact content
-     */
-    private async getOpenFilesContext(): Promise<string | null> {
-        try {
-            const artifactContent: string[] = [];
-            const regularFiles: string[] = [];
-            const processedArtifactPaths = new Set<string>();
-
-            // Collect all open tabs with their URIs
-            const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
-            this.outputChannel.appendLine(`[DEBUG] Found ${tabs.length} open tabs`);
-
-            for (const tab of tabs) {
-                if (tab.input && typeof tab.input === 'object' && tab.input !== null && 'uri' in tab.input) {
-                    const uri = (tab.input as any).uri as vscode.Uri;
-                    const fileName = this.getFileName(uri);
-                    const fullPath = uri.fsPath;
-                    this.outputChannel.appendLine(`[DEBUG] Checking tab: ${fileName} (${fullPath})`);
-
-                    // Check if this is an Antigravity artifact
-                    if (this.isArtifactFile(uri)) {
-                        this.outputChannel.appendLine(`[DEBUG] Detected artifact file: ${fileName}`);
-                        const content = await this.readArtifactFile(uri, fileName);
-                        if (content) {
-                            this.outputChannel.appendLine(`[DEBUG] Successfully read artifact content (${content.length} chars)`);
-                            artifactContent.push(content);
-                            processedArtifactPaths.add(fullPath);
-                        } else {
-                            this.outputChannel.appendLine(`[DEBUG] Failed to read artifact content`);
-                        }
-                    } else if (!regularFiles.includes(fileName)) {
-                        regularFiles.push(fileName);
-                    }
-                }
-            }
-
-            // Also search the .gemini directory for artifact files not in open tabs
-            this.outputChannel.appendLine('[DEBUG] Searching .gemini directory for artifacts...');
-            const filesystemArtifacts = await this.findArtifactFiles();
-            for (const artifact of filesystemArtifacts) {
-                this.outputChannel.appendLine(`[DEBUG] Found filesystem artifact: ${artifact.name}`);
-
-                if (!processedArtifactPaths.has(artifact.path)) {
-                    artifactContent.push(artifact.content);
-                } else {
-                    this.outputChannel.appendLine(`[DEBUG] Skipping duplicate artifact: ${artifact.name}`);
-                }
-            }
-
-            this.outputChannel.appendLine(`[DEBUG] Artifacts found: ${artifactContent.length}, Regular files: ${regularFiles.length}`);
-
-            const parts: string[] = [];
-
-            // Include artifact content first (most important)
-            if (artifactContent.length > 0) {
-                parts.push(...artifactContent);
-            }
-
-            // Include regular files list
-            if (regularFiles.length > 0) {
-                const fileList = regularFiles.slice(0, 5).join(', ');
-                parts.push(`Other open files: ${fileList}`);
-            }
-
-            return parts.length > 0 ? parts.join('\n\n') : null;
-        } catch (error) {
-            this.outputChannel.appendLine(`Error getting open files: ${error}`);
-            return null;
-        }
-    }
-
-    /**
      * Check if a URI is an Antigravity artifact file
      */
     private isArtifactFile(uri: vscode.Uri): boolean {
@@ -315,49 +332,88 @@ export class PromptGenerator {
     }
 
     /**
+     * Get list of open files and include artifact content
+     */
+    private async getOpenFilesContext(specificContextPath?: string): Promise<string | null> {
+        try {
+            const artifactContent: string[] = [];
+            const regularFiles: string[] = [];
+            const processedArtifactPaths = new Set<string>();
+
+            // Collect all open tabs with their URIs
+            const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
+
+            for (const tab of tabs) {
+                if (tab.input && typeof tab.input === 'object' && tab.input !== null && 'uri' in tab.input) {
+                    const uri = (tab.input as any).uri as vscode.Uri;
+                    const fileName = this.getFileName(uri);
+                    const fullPath = uri.fsPath;
+
+                    // Check if this is an Antigravity artifact
+                    if (this.isArtifactFile(uri)) {
+                        // If a specific context is requested, only include artifacts from that path
+                        if (specificContextPath && !fullPath.startsWith(specificContextPath)) {
+                            continue;
+                        }
+
+                        const content = await this.readArtifactFile(uri, fileName);
+                        if (content) {
+                            artifactContent.push(content);
+                            processedArtifactPaths.add(fullPath);
+                        }
+                    } else if (!regularFiles.includes(fileName)) {
+                        regularFiles.push(fileName);
+                    }
+                }
+            }
+
+            // Search for artifacts in the specified context or default location
+            const filesystemArtifacts = await this.findArtifactFiles(specificContextPath);
+            for (const artifact of filesystemArtifacts) {
+                if (!processedArtifactPaths.has(artifact.path)) {
+                    artifactContent.push(artifact.content);
+                }
+            }
+
+            const parts: string[] = [];
+
+            // Include artifact content first (most important)
+            if (artifactContent.length > 0) {
+                parts.push(...artifactContent);
+            }
+
+            // Include regular files list
+            if (regularFiles.length > 0) {
+                const fileList = regularFiles.slice(0, 5).join(', ');
+                parts.push(`Other open files: ${fileList}`);
+            }
+
+            return parts.length > 0 ? parts.join('\n\n') : null;
+        } catch (error) {
+            this.outputChannel.appendLine(`Error getting open files: ${error}`);
+            return null;
+        }
+    }
+
+    /**
      * Find artifact files in the .gemini directory
      */
-    private async findArtifactFiles(): Promise<{ name: string; content: string; path: string }[]> {
+    private async findArtifactFiles(specificContextPath?: string): Promise<{ name: string; content: string; path: string }[]> {
         try {
-            const homeDir = process.env.HOME || process.env.USERPROFILE;
-            if (!homeDir) {
-                return [];
+            let targetDir = specificContextPath;
+
+            // If no specific path provided, find the most recent one
+            if (!targetDir) {
+                const contexts = await this.getAvailableContexts();
+                if (contexts.length === 0) return [];
+                targetDir = contexts[0].path;
             }
 
-            const brainDir = path.join(homeDir, '.gemini', 'antigravity', 'brain');
-
-            // Check if brain dir exists
-            try {
-                await fs.access(brainDir);
-            } catch {
-                return [];
-            }
-
-            // Get all conversation directories
-            const entries = await fs.readdir(brainDir, { withFileTypes: true });
-            const dirs = entries.filter(e => e.isDirectory());
-
-            if (dirs.length === 0) {
-                return [];
-            }
-
-            // Sort by modification time to get the most recent one
-            const dirStats = await Promise.all(dirs.map(async (d) => {
-                const fullPath = path.join(brainDir, d.name);
-                const stats = await fs.stat(fullPath);
-                return { name: d.name, path: fullPath, mtime: stats.mtimeMs };
-            }));
-
-            // Sort descending
-            dirStats.sort((a, b) => b.mtime - a.mtime);
-
-            // Check the most recent directory
-            const latestDir = dirStats[0];
             const artifacts: { name: string; content: string; path: string }[] = [];
             const filesToLookFor = ['task.md', 'implementation_plan.md'];
 
             for (const fileName of filesToLookFor) {
-                const filePath = path.join(latestDir.path, fileName);
+                const filePath = path.join(targetDir!, fileName);
                 try {
                     await fs.access(filePath);
                     const uri = vscode.Uri.file(filePath);

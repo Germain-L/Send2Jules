@@ -1,5 +1,12 @@
 import { SecretsManager } from './secrets';
 
+export class ProjectNotInitializedError extends Error {
+    constructor(public owner: string, public repo: string) {
+        super(`Project ${owner}/${repo} not initialized in Jules.`);
+        this.name = 'ProjectNotInitializedError';
+    }
+}
+
 export class JulesClient {
     constructor(private secrets: SecretsManager) { }
 
@@ -31,6 +38,14 @@ export class JulesClient {
         });
 
         if (!response.ok) {
+            if (response.status === 404) {
+                // Check if it's the "Requested entity was not found" error
+                const errorText = await response.text();
+                if (errorText.includes("Requested entity was not found")) {
+                    throw new ProjectNotInitializedError(owner, repo);
+                }
+                throw new Error(`API Error ${response.status}: ${errorText}`);
+            }
             throw new Error(`API Error ${response.status}: ${await response.text()}`);
         }
 

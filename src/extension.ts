@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { JulesClient } from './julesClient';
+import { JulesClient, ProjectNotInitializedError } from './julesClient';
 import { GitContextManager } from './gitContext';
 import { SecretsManager } from './secrets';
 import { PromptGenerator } from './promptGenerator';
@@ -63,10 +63,46 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             }
 
-            // 3. Auto-generate context-aware prompt
+            // 3. Select Conversation Context
+            const availableContexts = await promptGenerator.getAvailableContexts();
+            let selectedContextPath: string | undefined;
+
+            if (availableContexts.length > 1) {
+                const items = availableContexts.map(ctx => {
+                    const date = new Date(ctx.time);
+                    return {
+                        label: ctx.title,
+                        description: date.toLocaleString(),
+                        detail: ctx.name,
+                        path: ctx.path
+                    };
+                });
+
+                // Add an option to use the current/latest automatically
+                items.unshift({
+                    label: "$(clock) Latest Conversation",
+                    description: "Automatically use the most recent context",
+                    detail: "",
+                    path: "" // Empty path signals auto-discovery
+                });
+
+                const selection = await vscode.window.showQuickPick(items, {
+                    placeHolder: "Select the conversation context to continue from",
+                    title: "Select Conversation Context"
+                });
+
+                if (!selection) return; // User cancelled
+
+                if (selection.path) {
+                    selectedContextPath = selection.path;
+                }
+            }
+
+            // 4. Auto-generate context-aware prompt
             const autoPrompt = await promptGenerator.generatePrompt(
                 repoDetails.repo,
-                vscode.window.activeTextEditor
+                vscode.window.activeTextEditor,
+                selectedContextPath
             );
 
             // 4. Show editable input with auto-generated prompt
@@ -102,9 +138,22 @@ export async function activate(context: vscode.ExtensionContext) {
         } catch (error: any) {
             outputChannel.appendLine(`Error: ${error.message}`);
             if (error.stack) outputChannel.appendLine(error.stack);
-            vscode.window.showErrorMessage(`Jules Handoff Failed: ${error.message}`);
+
+            if (error instanceof ProjectNotInitializedError) {
+                const selection = await vscode.window.showErrorMessage(
+                    `Jules does not have access to ${error.owner}/${error.repo}. Please install the Jules GitHub App.`,
+                    "Configure Jules",
+                    "Cancel"
+                );
+                if (selection === "Configure Jules") {
+                    vscode.env.openExternal(vscode.Uri.parse("https://jules.google.com/settings/repositories"));
+                }
+            } else {
+                vscode.window.showErrorMessage(`Jules Handoff Failed: ${error.message}`);
+            }
         } finally {
             statusBarItem.text = '$(rocket) Send to Jules';
         }
     }));
 }
+
