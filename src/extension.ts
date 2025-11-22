@@ -24,6 +24,7 @@ import { JulesClient, ProjectNotInitializedError } from './julesClient';
 import { GitContextManager } from './gitContext';
 import { SecretsManager } from './secrets';
 import { PromptGenerator } from './promptGenerator';
+import { AntigravityDetector } from './antigravityDetector';
 
 /**
  * Status bar item that displays the "Send to Jules" button
@@ -49,6 +50,49 @@ export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel("Jules Bridge");
     context.subscriptions.push(outputChannel);
     outputChannel.appendLine("Jules Bridge Extension Activated");
+
+    // ============================================================
+    // ANTIGRAVITY ENVIRONMENT VALIDATION
+    // ============================================================
+    // This extension is designed exclusively for the Antigravity IDE.
+    // It requires access to Antigravity conversation artifacts and
+    // infrastructure that are not available in regular VS Code.
+
+    const antigravityDetector = new AntigravityDetector();
+    const detectionDetails = antigravityDetector.getDetectionDetails();
+
+    // Log detection details for debugging
+    outputChannel.appendLine("=== Antigravity Environment Detection ===");
+    outputChannel.appendLine(`App Name: ${detectionDetails.appName}`);
+    outputChannel.appendLine(`Brain Directory: ${detectionDetails.brainDirectoryPath}`);
+    outputChannel.appendLine(`Brain Directory Exists: ${detectionDetails.hasBrainDirectory}`);
+    outputChannel.appendLine(`App Name Match: ${detectionDetails.isAntigravityAppName}`);
+    outputChannel.appendLine(`Env Vars Match: ${detectionDetails.hasAntigravityEnvVars}`);
+    outputChannel.appendLine(`Is Antigravity: ${detectionDetails.isAntigravity}`);
+    outputChannel.appendLine("=========================================");
+
+    if (!antigravityDetector.isAntigravityEnvironment()) {
+        const warningMessage = antigravityDetector.getWarningMessage();
+        outputChannel.appendLine(`[ERROR] ${warningMessage}`);
+        outputChannel.appendLine("Extension will not be activated.");
+
+        // Show warning to user (only once per session)
+        vscode.window.showWarningMessage(
+            warningMessage,
+            "Learn More"
+        ).then(selection => {
+            if (selection === "Learn More") {
+                vscode.env.openExternal(
+                    vscode.Uri.parse("https://deepmind.google/technologies/antigravity/")
+                );
+            }
+        });
+
+        // Exit activation early - do not register commands or UI
+        return;
+    }
+
+    outputChannel.appendLine("[SUCCESS] Running in Antigravity IDE. Proceeding with activation...");
 
     const secrets = new SecretsManager(context);
     const gitManager = new GitContextManager(outputChannel);

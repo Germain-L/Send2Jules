@@ -1,5 +1,8 @@
 # Antigravity Jules Bridge
 
+> [!IMPORTANT]
+> **Antigravity IDE Required**: This extension is designed exclusively for the [Antigravity IDE](https://antigravity.google/) and will not function in regular VS Code. It requires access to Antigravity conversation artifacts and infrastructure.
+
 A VS Code extension that enables seamless handoff of development work to the [Jules autonomous agent](https://jules.google.com). This extension intelligently captures your current workspace context—including uncommitted changes, open files, cursor position, and Antigravity conversation artifacts—to provide Jules with rich context for continuing your work.
 
 ## ✨ Features
@@ -31,13 +34,15 @@ A VS Code extension that enables seamless handoff of development work to the [Ju
 ## 📦 Installation
 
 ### Prerequisites
-1. **VS Code**: Version 1.80.0 or higher
+1. **Antigravity IDE**: This extension **only works in Antigravity IDE**
+   - Download from [Antigravity](https://antigravity.google/)
+   - Will not activate in regular VS Code
 2. **Git**: A workspace with a Git repository
 3. **Jules API Access**: 
    - A Google Cloud Project with Jules API enabled
    - Jules API Key ([Get one here](https://jules.google.com/settings))
 4. **GitHub Integration**: 
-   - Jules GitHub App installed for your repositories ([Configure here](https://jules.google.com/settings/repositories))
+   - Jules GitHub App installed for your repositories ([Configure here](https://jules.google.com/))
 
 ### Install Extension
 1. Download the extension from the VS Code Marketplace (or install from `.vsix` file)
@@ -287,13 +292,25 @@ Send2Jules/
 
 ## 🐛 Troubleshooting
 
+### "This extension requires the Antigravity IDE"
+**Cause**: The extension detected that it's running in regular VS Code instead of Antigravity IDE.  
+**Solution**: 
+1. Download and install [Antigravity IDE](https://deepmind.google/technologies/antigravity/)
+2. Open your project in Antigravity IDE instead of VS Code
+3. The extension will automatically activate in Antigravity
+
+**Why?** This extension relies on Antigravity-specific features:
+- Access to `~/.gemini/antigravity/brain/` conversation artifacts
+- Antigravity agent context and infrastructure
+- Integration with Antigravity's task management system
+
 ### "Open a file in a Git repository to use Jules"
 **Cause**: No Git repository detected in the workspace.  
 **Solution**: Open a folder that contains a `.git` directory.
 
 ### "Jules does not have access to owner/repo"
 **Cause**: The repository is not initialized in Jules.  
-**Solution**: 
+**Solution**:
 1. Visit [Jules Repository Settings](https://jules.google.com/settings/repositories)
 2. Install and configure the Jules GitHub App for your repository
 3. Grant necessary permissions
