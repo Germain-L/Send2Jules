@@ -299,8 +299,8 @@ async function getPromptFromEditor(initialContent: string, outputChannel?: vscod
             await vscode.window.showTextDocument(doc);
 
             const disposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
-                // Compare using toString() for robustness against path normalization issues
-                if (closedDoc.uri.toString() === vscode.Uri.file(filePath).toString()) {
+                // Compare against the specific document URI we opened
+                if (closedDoc.uri.toString() === doc.uri.toString()) {
                     disposable.dispose();
                     // Read file from disk
                     try {
