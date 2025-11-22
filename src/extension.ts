@@ -1,6 +1,6 @@
 /**
  * Antigravity Jules Bridge Extension
- * 
+ *
  * This VS Code extension enables seamless handoff of development work to the Jules autonomous agent.
  * It provides intelligent context awareness by:
  * - Detecting and syncing uncommitted Git changes
@@ -8,14 +8,14 @@
  * - Analyzing workspace state (open files, cursor position, git diff)
  * - Generating context-rich prompts for Jules
  * - Creating Jules sessions via the Google Jules API
- * 
+ *
  * Architecture:
  * - extension.ts: Main extension entry point and command registration
  * - gitContext.ts: Git repository detection and WIP commit management
  * - promptGenerator.ts: Intelligent prompt generation from workspace context
  * - julesClient.ts: Jules API client for session creation
  * - secrets.ts: Secure API key storage using VS Code SecretStorage
- * 
+ *
  * @module extension
  */
 
@@ -25,6 +25,9 @@ import { GitContextManager } from './gitContext';
 import { SecretsManager } from './secrets';
 import { PromptGenerator } from './promptGenerator';
 import { AntigravityDetector } from './antigravityDetector';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 /**
  * Status bar item that displays the "Send to Jules" button
@@ -33,16 +36,16 @@ let statusBarItem: vscode.StatusBarItem;
 
 /**
  * Extension activation function called by VS Code when the extension is activated.
- * 
+ *
  * This function:
  * 1. Initializes core managers (Git, Secrets, Jules Client, Prompt Generator)
  * 2. Creates a status bar button for quick access
  * 3. Registers two commands:
  *    - `julesBridge.setApiKey`: Configure Jules API key
  *    - `julesBridge.sendFlow`: Main handoff command
- * 
+ *
  * The extension activates when a workspace contains a `.git` directory.
- * 
+ *
  * @param context - VS Code extension context for managing subscriptions and lifecycle
  */
 export async function activate(context: vscode.ExtensionContext) {
@@ -108,7 +111,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     /**
      * Command: julesBridge.setApiKey
-     * 
+     *
      * Prompts the user to enter their Jules API key and stores it securely
      * in the OS keychain via VS Code's SecretStorage API.
      */
@@ -118,16 +121,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
     /**
      * Command: julesBridge.sendFlow
-     * 
+     *
      * Main handoff command that executes the following workflow:
-     * 
+     *
      * 1. **Validate Git State**: Ensures the workspace has a Git repository
      * 2. **Handle Dirty State**: Automatically or manually creates WIP commit and pushes to new branch
      * 3. **Select Conversation Context**: Allows user to choose which Antigravity conversation to continue
      * 4. **Generate Prompt**: Creates intelligent prompt from workspace context (git diff, cursor position, artifacts)
      * 5. **Commission Agent**: Creates a Jules session via API
      * 6. **Provide Feedback**: Shows success message with link to Jules dashboard
-     * 
+     *
      * The status bar button shows progress indicators throughout the flow.
      */
     context.subscriptions.push(vscode.commands.registerCommand('julesBridge.sendFlow', async () => {
@@ -210,13 +213,16 @@ export async function activate(context: vscode.ExtensionContext) {
             );
 
             // Present the auto-generated prompt to user for review/editing
-            const userPrompt = await vscode.window.showInputBox({
-                title: "Jules Mission Brief",
-                prompt: "Review and edit the auto-generated prompt, or write your own",
-                value: autoPrompt,
-                placeHolder: "e.g., Implement the logout logic in auth.ts..."
-            });
-            if (!userPrompt) return;
+            statusBarItem.text = '$(pencil) Editing prompt...';
+
+            const userPrompt = await getPromptFromEditor(autoPrompt, outputChannel);
+
+            if (!userPrompt) {
+                // User cancelled (empty file)
+                outputChannel.appendLine("Prompt cancelled by user (empty content).");
+                statusBarItem.text = '$(rocket) Send to Jules';
+                return;
+            }
 
             const fullPrompt = userPrompt;
 
@@ -265,3 +271,68 @@ export async function activate(context: vscode.ExtensionContext) {
     }));
 }
 
+/**
+ * Helper to open a temporary text file for the user to edit the prompt.
+ * Acts similarly to `git commit` editor behavior.
+ *
+ * 1. Creates a temp file with initial content and instructions
+ * 2. Opens it in VS Code
+ * 3. Waits for the file to be closed
+ * 4. Reads content, strips comments, and returns cleaned text
+ *
+ * @param initialContent - Auto-generated prompt text
+ * @returns The final prompt text, or undefined if cancelled/empty
+ */
+async function getPromptFromEditor(initialContent: string, outputChannel?: vscode.OutputChannel): Promise<string | undefined> {
+    return new Promise(async (resolve) => {
+        try {
+            const tempDir = os.tmpdir();
+            // Use timestamp to prevent collisions
+            const filePath = path.join(tempDir, `JULES_INSTRUCTIONS_${Date.now()}.md`);
+
+            const separator = "\n\n<!-- Everything below this line will be ignored by Jules -->";
+            const instructions = "\n\n# Please review the mission brief for Jules.\n# Closing this file will submit the prompt.\n# To cancel, delete all content and close the file.";
+            const fullContent = initialContent + separator + instructions;
+
+            await fs.promises.writeFile(filePath, fullContent);
+            const doc = await vscode.workspace.openTextDocument(filePath);
+            await vscode.window.showTextDocument(doc);
+
+            const disposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
+                // Compare using toString() for robustness against path normalization issues
+                if (closedDoc.uri.toString() === vscode.Uri.file(filePath).toString()) {
+                    disposable.dispose();
+                    // Read file from disk
+                    try {
+                        const savedContent = await fs.promises.readFile(filePath, 'utf8');
+                        // Clean up
+                        try {
+                            await fs.promises.unlink(filePath);
+                        } catch (e) {
+                            // Ignore cleanup errors
+                        }
+
+                        // Process content: Strip everything after the separator
+                        const separatorIndex = savedContent.indexOf('<!-- Everything below this line will be ignored by Jules -->');
+                        let finalContent = separatorIndex !== -1
+                            ? savedContent.substring(0, separatorIndex)
+                            : savedContent;
+
+                        finalContent = finalContent.trim();
+
+                        resolve(finalContent.length > 0 ? finalContent : undefined);
+                    } catch (e) {
+                        resolve(undefined);
+                    }
+                }
+            });
+        } catch (error) {
+            if (outputChannel) {
+                outputChannel.appendLine(`Error in getPromptFromEditor: ${error}`);
+            } else {
+                console.error("Error in getPromptFromEditor:", error);
+            }
+            resolve(undefined);
+        }
+    });
+}
