@@ -213,9 +213,9 @@ export async function activate(context: vscode.ExtensionContext) {
             );
 
             // Present the auto-generated prompt to user for review/editing
-            statusBarItem.text = '$(pencil) Editing prompt...';
+            statusBarItem.text = '$(eye) Review prompt...';
 
-            const userPrompt = await getPromptFromEditor(autoPrompt, outputChannel);
+            const userPrompt = await getPromptWithQuickPick(autoPrompt, statusBarItem, outputChannel);
 
             if (!userPrompt) {
                 // User cancelled (empty file)
@@ -272,67 +272,185 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 /**
- * Helper to open a temporary text file for the user to edit the prompt.
- * Acts similarly to `git commit` editor behavior.
- *
- * 1. Creates a temp file with initial content and instructions
- * 2. Opens it in VS Code
- * 3. Waits for the file to be closed
- * 4. Reads content, strips comments, and returns cleaned text
- *
+ * Shows a Quick Pick UI for reviewing and editing the auto-generated prompt.
+ * 
+ * User flow:
+ * 1. Shows a Quick Pick with prompt preview and three actions:
+ *    - Send to Jules: Sends the prompt immediately
+ *    - Edit Prompt: Opens editor for modifications
+ *    - Cancel: Cancels the operation
+ * 2. If "Edit" is chosen, opens an editor and integrates with status bar for sending
+ * 
  * @param initialContent - Auto-generated prompt text
- * @returns The final prompt text, or undefined if cancelled/empty
+ * @param statusBar - Status bar item to update for edit flow
+ * @param outputChannel - Output channel for logging
+ * @returns The final prompt text, or undefined if cancelled
  */
-async function getPromptFromEditor(initialContent: string, outputChannel?: vscode.OutputChannel): Promise<string | undefined> {
-    return new Promise(async (resolve) => {
-        try {
-            const tempDir = os.tmpdir();
-            // Use timestamp to prevent collisions
-            const filePath = path.join(tempDir, `JULES_INSTRUCTIONS_${Date.now()}.md`);
+async function getPromptWithQuickPick(
+    initialContent: string,
+    statusBar: vscode.StatusBarItem,
+    outputChannel?: vscode.OutputChannel
+): Promise<string | undefined> {
+    // Truncate preview if too long (Quick Pick has limited display space)
+    const maxPreviewLength = 500;
+    const preview = initialContent.length > maxPreviewLength
+        ? initialContent.substring(0, maxPreviewLength) + '...\n\n[Prompt truncated for preview]'
+        : initialContent;
 
-            const separator = "\n\n<!-- Everything below this line will be ignored by Jules -->";
-            const instructions = "\n\n# Please review the mission brief for Jules.\n# Closing this file will submit the prompt.\n# To cancel, delete all content and close the file.";
-            const fullContent = initialContent + separator + instructions;
+    // Create Quick Pick items
+    interface PromptAction extends vscode.QuickPickItem {
+        action: 'send' | 'edit' | 'cancel';
+    }
 
-            await fs.promises.writeFile(filePath, fullContent);
-            const doc = await vscode.workspace.openTextDocument(filePath);
-            await vscode.window.showTextDocument(doc);
+    const actions: PromptAction[] = [
+        {
+            label: '$(rocket) Send to Jules',
+            description: 'Send the auto-generated prompt as-is',
+            detail: 'No edits needed - send immediately',
+            action: 'send'
+        },
+        {
+            label: '$(pencil) Edit Prompt',
+            description: 'Review and modify the prompt before sending',
+            detail: 'Opens editor with status bar "Send" button',
+            action: 'edit'
+        },
+        {
+            label: '$(x) Cancel',
+            description: 'Cancel the handoff to Jules',
+            detail: '',
+            action: 'cancel'
+        }
+    ];
 
-            const disposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
-                // Compare against the specific document URI we opened
-                if (closedDoc.uri.toString() === doc.uri.toString()) {
-                    disposable.dispose();
-                    // Read file from disk
-                    try {
-                        const savedContent = await fs.promises.readFile(filePath, 'utf8');
-                        // Clean up
+    // Show Quick Pick
+    const selection = await vscode.window.showQuickPick(actions, {
+        placeHolder: 'Choose how to proceed with the Jules prompt',
+        title: `Jules Prompt Preview\n\n${preview}`,
+        ignoreFocusOut: true
+    });
+
+    if (!selection || selection.action === 'cancel') {
+        outputChannel?.appendLine('User cancelled prompt via Quick Pick');
+        return undefined;
+    }
+
+    if (selection.action === 'send') {
+        outputChannel?.appendLine('User chose to send prompt immediately');
+        return initialContent;
+    }
+
+    // Handle 'edit' action - open editor and wait for user to click status bar
+    if (selection.action === 'edit') {
+        return new Promise<string | undefined>(async (resolve) => {
+            let tempFilePath: string | undefined;
+
+            try {
+                // Create a temporary file that won't prompt for save location
+                const tempDir = os.tmpdir();
+                tempFilePath = path.join(tempDir, `JULES_PROMPT_${Date.now()}.md`);
+
+                // Write initial content to temp file
+                await fs.promises.writeFile(tempFilePath, initialContent, 'utf8');
+
+                // Open the temp file in editor
+                const doc = await vscode.workspace.openTextDocument(tempFilePath);
+                await vscode.window.showTextDocument(doc);
+
+                outputChannel?.appendLine('Opened prompt in editor for user modifications');
+
+                // Show notification to guide user
+                vscode.window.showInformationMessage(
+                    '✏️ Edit your prompt, then click "Send Prompt to Jules" in the status bar (bottom right) to send.',
+                    'Got it'
+                );
+
+                // Update status bar to show "Send" action
+                const originalText = statusBar.text;
+                const originalCommand = statusBar.command;
+                statusBar.text = '$(rocket) Send Prompt to Jules';
+                statusBar.tooltip = 'Click to send the edited prompt to Jules';
+
+                // Create a one-time command for sending the current document
+                let commandDisposable: vscode.Disposable | undefined;
+                let docCloseDisposable: vscode.Disposable | undefined;
+
+                const cleanup = async (deleteTempFile: boolean = true) => {
+                    commandDisposable?.dispose();
+                    docCloseDisposable?.dispose();
+                    statusBar.text = originalText;
+                    statusBar.command = originalCommand;
+                    statusBar.tooltip = undefined;
+
+                    // Delete temp file
+                    if (deleteTempFile && tempFilePath) {
                         try {
-                            await fs.promises.unlink(filePath);
+                            await fs.promises.unlink(tempFilePath);
                         } catch (e) {
                             // Ignore cleanup errors
                         }
+                    }
+                };
 
-                        // Process content: Strip everything after the separator
-                        const separatorIndex = savedContent.indexOf('<!-- Everything below this line will be ignored by Jules -->');
-                        let finalContent = separatorIndex !== -1
-                            ? savedContent.substring(0, separatorIndex)
-                            : savedContent;
+                // Register temporary command that reads the current document
+                commandDisposable = vscode.commands.registerCommand('julesBridge.sendEditedPrompt', async () => {
+                    try {
+                        const currentDoc = vscode.window.activeTextEditor?.document;
+                        if (currentDoc && currentDoc.uri.toString() === doc.uri.toString()) {
+                            const editedContent = currentDoc.getText().trim();
 
-                        finalContent = finalContent.trim();
+                            if (editedContent.length === 0) {
+                                vscode.window.showWarningMessage('Prompt is empty. Cancelling send.');
+                                await cleanup();
+                                resolve(undefined);
+                                return;
+                            }
 
-                        resolve(finalContent.length > 0 ? finalContent : undefined);
-                    } catch (e) {
+                            outputChannel?.appendLine('User sent edited prompt via status bar');
+
+                            // Close the document without saving (it's already saved to temp file)
+                            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+
+                            await cleanup();
+                            resolve(editedContent);
+                        } else {
+                            vscode.window.showWarningMessage('Please keep the prompt document active to send.');
+                        }
+                    } catch (error) {
+                        outputChannel?.appendLine(`Error sending edited prompt: ${error}`);
+                        await cleanup();
                         resolve(undefined);
                     }
+                });
+
+                // Update status bar to use the new command
+                statusBar.command = 'julesBridge.sendEditedPrompt';
+
+                // Handle document close (user closed without sending)
+                docCloseDisposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
+                    if (closedDoc.uri.toString() === doc.uri.toString()) {
+                        outputChannel?.appendLine('User closed prompt editor without sending');
+                        await cleanup();
+                        resolve(undefined);
+                    }
+                });
+
+            } catch (error) {
+                outputChannel?.appendLine(`Error in edit flow: ${error}`);
+
+                // Clean up temp file on error
+                if (tempFilePath) {
+                    try {
+                        await fs.promises.unlink(tempFilePath);
+                    } catch (e) {
+                        // Ignore cleanup errors
+                    }
                 }
-            });
-        } catch (error) {
-            if (outputChannel) {
-                outputChannel.appendLine(`Error in getPromptFromEditor: ${error}`);
-            } else {
-                console.error("Error in getPromptFromEditor:", error);
+
+                resolve(undefined);
             }
-            resolve(undefined);
-        }
-    });
+        });
+    }
+
+    return undefined;
 }
