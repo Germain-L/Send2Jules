@@ -3,7 +3,7 @@
     "displayName": "Antigravity Jules Bridge",
     "description": "[Antigravity IDE Only] Asynchronous handoff extension to send current flow to Jules Agent.",
     "version": "1.0.0",
-    "publisher": "enterprise-integration",
+    "publisher": "antigravity-jules-bridge",
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
@@ -60,7 +60,8 @@
         "compile": "tsc -p ./",
         "watch": "tsc -watch -p ./",
         "test": "npm run compile && node ./out/test/runTest.js",
-        "test:unit": "npm run compile && mocha --ui tdd --require ./out/test/unit-tests-runner.js ./out/test/suite/validators.test.js ./out/test/suite/promptGenerator.test.js ./out/test/suite/gitContext.test.js"
+        "test:unit": "npm run compile && mocha --ui tdd --require ./out/test/unit-tests-runner.js ./out/test/suite/validators.test.js ./out/test/suite/promptGenerator.test.js ./out/test/suite/gitContext.test.js",
+        "ovsx:publish": "npx ovsx publish"
     },
     "devDependencies": {
         "@types/glob": "^8.1.0",
