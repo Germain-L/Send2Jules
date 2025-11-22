@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { JulesClient } from './julesClient';
 import { GitContextManager } from './gitContext';
 import { SecretsManager } from './secrets';
+import { PromptGenerator } from './promptGenerator';
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -14,6 +15,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const secrets = new SecretsManager(context);
     const gitManager = new GitContextManager(outputChannel);
     const julesClient = new JulesClient(secrets);
+    const promptGenerator = new PromptGenerator(outputChannel);
 
     // Initialize UI
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -61,21 +63,22 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             }
 
-            // 3. Capture User Intent
+            // 3. Auto-generate context-aware prompt
+            const autoPrompt = await promptGenerator.generatePrompt(
+                repoDetails.repo,
+                vscode.window.activeTextEditor
+            );
+
+            // 4. Show editable input with auto-generated prompt
             const userPrompt = await vscode.window.showInputBox({
                 title: "Jules Mission Brief",
-                prompt: "Describe the task for the agent",
+                prompt: "Review and edit the auto-generated prompt, or write your own",
+                value: autoPrompt,
                 placeHolder: "e.g., Implement the logout logic in auth.ts..."
             });
             if (!userPrompt) return;
 
-            // 4. Capture Implicit Context (Open Tabs)
-            const openFiles = vscode.window.tabGroups.all
-                .flatMap(group => group.tabs)
-                .map(tab => tab.label)
-                .join(', ');
-
-            const fullPrompt = `${userPrompt}\n\n[Context Note: Active files: ${openFiles}]`;
+            const fullPrompt = userPrompt;
 
             // 5. Commission Agent
             statusBarItem.text = '$(cloud-upload) Sending...';

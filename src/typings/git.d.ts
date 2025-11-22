@@ -38,4 +38,5 @@ export interface Remote {
 
 export interface Change {
     uri: vscode.Uri;
+    status: number; // Git status code (0=modified, 1=added, 6=deleted, etc.)
 }
