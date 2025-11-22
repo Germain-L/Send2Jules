@@ -137,6 +137,9 @@ export const PATHS = {
 
     /** Artifact file names */
     ARTIFACTS: ['task.md', 'implementation_plan.md'] as const,
+
+    /** Temporary prompt file name */
+    JULES_PROMPT_FILE: 'JULES_PROMPT.md',
 };
 
 /**
@@ -173,6 +176,9 @@ export const MESSAGES = {
     PROMPT_INPUT_TITLE: 'Jules Mission Brief',
     PROMPT_INPUT_PLACEHOLDER: 'e.g., Implement the logout logic in auth.ts...',
     PROMPT_INPUT_PROMPT: 'Review and edit the auto-generated prompt, or write your own',
+    PROMPT_OPENED: 'Prompt opened in editor. Edit the file and click "Validate and Send" when ready.',
+    NO_PENDING_SESSION: 'No pending Jules session found. Run "Send to Jules" to start a new session.',
+    PROMPT_SUBMITTED: 'Prompt submitted to Jules.',
 
     // Warnings
     ANTIGRAVITY_ONLY: 'This extension requires the Antigravity IDE. ' +

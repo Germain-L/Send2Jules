@@ -28,8 +28,22 @@
             {
                 "command": "julesBridge.setApiKey",
                 "title": "Set Jules API Key"
+            },
+            {
+                "command": "julesBridge.submitPrompt",
+                "title": "Validate and Send",
+                "icon": "$(rocket)"
             }
         ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "julesBridge.submitPrompt",
+                    "when": "resourceFilename == JULES_PROMPT.md",
+                    "group": "navigation"
+                }
+            ]
+        },
         "configuration": {
             "title": "Jules Bridge",
             "properties": {
