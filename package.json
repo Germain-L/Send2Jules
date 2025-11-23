@@ -7,7 +7,7 @@
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/google/antigravity-jules-bridge"
+        "url": "https://github.com/Germain-L/Send2Jules"
     },
     "engines": {
         "vscode": "^1.80.0"
