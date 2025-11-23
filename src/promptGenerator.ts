@@ -174,30 +174,26 @@ export class PromptGenerator {
      * Generate an intelligent prompt based on current workspace context.
      * 
      * This is the main entry point that combines multiple context sources:
-     * 1. Git diff analysis (what files are being worked on)
-     * 2. Active errors (diagnostics)
-     * 3. Cursor/selection context (where the user is currently editing)
-     * 4. Open files and Antigravity artifacts (task.md, implementation_plan.md)
+     * 1. Active errors (diagnostics)
+     * 2. Antigravity artifacts (task.md, implementation_plan.md)
      * 
      * The generated prompt uses an XML structure to provide clear context to Jules.
      * 
-     * @param repo - Git repository object for diff analysis
-     * @param activeEditor - Currently active text editor (optional)
+     * @param repo - Git repository object (unused in new strategy but kept for interface compatibility)
+     * @param activeEditor - Currently active text editor (unused in new strategy but kept for interface compatibility)
      * @param contextPath - Specific conversation context path to use (optional, defaults to latest)
      * @returns Generated prompt string ready for Jules API
      */
     async generatePrompt(repo: Repository, activeEditor?: vscode.TextEditor, contextPath?: string): Promise<string> {
         try {
             // Execute context gathering in parallel
-            const [diff, errors, symbols, artifacts] = await Promise.all([
-                this.getUnifiedDiff(repo),
+            const [errors, artifacts] = await Promise.all([
                 this.getDiagnostics(),
-                activeEditor ? this.getDeepSymbolContext(activeEditor) : Promise.resolve(null),
                 this.getOpenFilesContext(contextPath)
             ]);
 
             // Assemble XML parts
-            return this.assemblePrompt(diff, errors, symbols, artifacts, activeEditor);
+            return this.assemblePrompt(errors, artifacts);
         } catch (error) {
             this.outputChannel.appendLine(`Error generating prompt: ${error}`);
             return `<instruction>Continue working on this project</instruction>
@@ -205,37 +201,6 @@ export class PromptGenerator {
 </workspace_context>
 <mission_brief>[Describe your task here...]</mission_brief>`;
         }
-    }
-
-    /**
-     * Get unified diff content for staged and unstaged changes.
-     * Iterates through changed files and reads their current content.
-     */
-    private async getUnifiedDiff(repo: Repository): Promise<string> {
-        const changes = [...repo.state.workingTreeChanges, ...repo.state.indexChanges];
-        if (changes.length === 0) return '';
-
-        const parts: string[] = [];
-        const processedFiles = new Set<string>();
-
-        for (const change of changes) {
-            const fileName = this.getFileName(change.uri);
-            if (processedFiles.has(fileName)) continue;
-            processedFiles.add(fileName);
-
-            try {
-                // Spec: "For each file, read its current text content."
-                const document = await vscode.workspace.openTextDocument(change.uri);
-                const content = document.getText();
-                parts.push(`--- ${fileName} ---\n${content}`);
-            } catch (e) {
-                // Handle deleted files or errors
-                if (change.status === GitStatus.DELETED || change.status === GitStatus.INDEX_DELETED) {
-                    parts.push(`--- ${fileName} ---\n[DELETED]`);
-                }
-            }
-        }
-        return parts.join('\n\n');
     }
 
     /**
@@ -332,7 +297,6 @@ export class PromptGenerator {
     private async getOpenFilesContext(specificContextPath?: string): Promise<string | null> {
         try {
             const artifactContent: string[] = [];
-            const regularFiles: string[] = [];
             const processedArtifactPaths = new Set<string>();
 
             const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
@@ -340,8 +304,8 @@ export class PromptGenerator {
             for (const tab of tabs) {
                 if (tab.input && typeof tab.input === 'object' && tab.input !== null && 'uri' in tab.input) {
                     const uri = (tab.input as any).uri as vscode.Uri;
-                    const fileName = this.getFileName(uri);
                     const fullPath = uri.fsPath;
+                    const fileName = this.getFileName(uri);
 
                     if (this.isArtifactFile(uri)) {
                         if (specificContextPath && !fullPath.startsWith(specificContextPath)) {
@@ -353,8 +317,6 @@ export class PromptGenerator {
                             artifactContent.push(content);
                             processedArtifactPaths.add(fullPath);
                         }
-                    } else if (!regularFiles.includes(fileName)) {
-                        regularFiles.push(fileName);
                     }
                 }
             }
@@ -366,18 +328,7 @@ export class PromptGenerator {
                 }
             }
 
-            const parts: string[] = [];
-
-            if (artifactContent.length > 0) {
-                parts.push(...artifactContent);
-            }
-
-            if (regularFiles.length > 0) {
-                const fileList = regularFiles.slice(0, CODE_ANALYSIS.MAX_FILES_IN_PROMPT).join(', ');
-                parts.push(`Other open files: ${fileList}`);
-            }
-
-            return parts.length > 0 ? parts.join('\n\n') : null;
+            return artifactContent.length > 0 ? artifactContent.join('\n\n') : null;
         } catch (error) {
             this.outputChannel.appendLine(`Error getting open files: ${error}`);
             return null;
@@ -457,8 +408,8 @@ export class PromptGenerator {
     /**
      * Assemble the final prompt XML with budget management.
      */
-    private assemblePrompt(diff: string, errors: string | null, symbols: string | null, artifacts: string | null, activeEditor?: vscode.TextEditor): string {
-        const instruction = "You are an expert software engineer. Analyze the workspace context and complete the mission brief.";
+    private assemblePrompt(errors: string | null, artifacts: string | null): string {
+        const instruction = "You are an expert software engineer. You are working on a WIP branch. Please run `git status` and `git diff` to understand the changes and the current state of the code. Analyze the workspace context and complete the mission brief.";
         const missionBriefPlaceholder = "[Describe your task here...]";
 
         const maxLen = VALIDATION.PROMPT_MAX_LENGTH;
@@ -470,32 +421,10 @@ export class PromptGenerator {
         let currentLen = baseStart.length + baseEnd.length;
         let remainingBudget = maxLen - currentLen;
 
-        // 2. Active File & Cursor
-        let activeFileStr = "";
-        if (activeEditor) {
-            const fileName = this.getFileName(activeEditor.document.uri);
-            const cursorLine = activeEditor.selection.active.line + 1;
-            const fileContent = activeEditor.document.getText();
-
-            let contextStr = `File: ${fileName}\nCursor Line: ${cursorLine}`;
-            if (symbols) {
-                contextStr += `\nContext: ${symbols}`;
-            }
-            contextStr += `\n\n${fileContent}`;
-
-            activeFileStr = `<active_file>\n${contextStr}\n</active_file>\n`;
-        }
-
         // 3. Active Errors
         let activeErrorsStr = "";
         if (errors) {
             activeErrorsStr = `<active_errors>\n${errors}\n</active_errors>\n`;
-        }
-
-        // 4. Git Diff
-        let gitDiffStr = "";
-        if (diff) {
-            gitDiffStr = `<git_diff>\n${diff}\n</git_diff>\n`;
         }
 
         // 5. Artifacts
@@ -507,19 +436,6 @@ export class PromptGenerator {
         // Assemble with priority
         let finalContext = "";
 
-        // Priority 2: Active File
-        if (activeFileStr.length <= remainingBudget) {
-            finalContext += activeFileStr;
-            remainingBudget -= activeFileStr.length;
-        } else {
-            // Truncate active file if needed
-            const header = activeFileStr.split('\n\n')[0];
-            if (header.length < remainingBudget) {
-                finalContext += header + "\n[Content truncated]\n</active_file>\n";
-                remainingBudget -= (header.length + 30);
-            }
-        }
-
         // Priority 3: Active Errors
         if (activeErrorsStr.length <= remainingBudget) {
             finalContext += activeErrorsStr;
@@ -527,17 +443,6 @@ export class PromptGenerator {
         } else {
             if (remainingBudget > 50) {
                 finalContext += activeErrorsStr.substring(0, remainingBudget - 20) + "...</active_errors>\n";
-                remainingBudget = 0;
-            }
-        }
-
-        // Priority 4: Git Diff
-        if (gitDiffStr.length <= remainingBudget) {
-            finalContext += gitDiffStr;
-            remainingBudget -= gitDiffStr.length;
-        } else {
-            if (remainingBudget > 50) {
-                finalContext += gitDiffStr.substring(0, remainingBudget - 20) + "...</git_diff>\n";
                 remainingBudget = 0;
             }
         }

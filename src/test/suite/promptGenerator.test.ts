@@ -40,7 +40,7 @@ suite('PromptGenerator Test Suite', () => {
         sandbox.restore();
     });
 
-    test('generatePrompt - basic structure', async () => {
+    test('generatePrompt - basic structure and instructions', async () => {
         const repo = {
             state: {
                 workingTreeChanges: [],
@@ -49,83 +49,18 @@ suite('PromptGenerator Test Suite', () => {
         } as unknown as Repository;
 
         const prompt = await promptGenerator.generatePrompt(repo);
+
+        // Check for XML structure
         assert.ok(prompt.includes('<instruction>'));
         assert.ok(prompt.includes('<workspace_context>'));
         assert.ok(prompt.includes('<mission_brief>'));
-    });
 
-    test('generatePrompt - with diff', async () => {
-        const repo = {
-            state: {
-                workingTreeChanges: [
-                    { uri: vscode.Uri.file('/path/to/file1.ts'), status: 5 /* MODIFIED */ }
-                ],
-                indexChanges: []
-            }
-        } as unknown as Repository;
+        // Check for specific instructions
+        assert.ok(prompt.includes('run `git status` and `git diff`'));
 
-        // Override openTextDocument for this test
-        (vscode.workspace.openTextDocument as sinon.SinonStub).resolves({
-            getText: () => 'modified content',
-            uri: vscode.Uri.file('/path/to/file1.ts')
-        });
-
-        const prompt = await promptGenerator.generatePrompt(repo);
-        assert.ok(prompt.includes('<git_diff>'));
-        assert.ok(prompt.includes('--- file1.ts ---'));
-        assert.ok(prompt.includes('modified content'));
-    });
-
-    test('generatePrompt - with cursor context and symbols', async () => {
-        const repo = {
-            state: { workingTreeChanges: [], indexChanges: [] }
-        } as unknown as Repository;
-
-        const document = {
-            uri: vscode.Uri.file('/path/to/file.ts'),
-            getText: () => 'function test() {}',
-            lineAt: () => ({ text: 'function test() {}' }),
-            offsetAt: () => 0
-        } as unknown as vscode.TextDocument;
-
-        const editor = {
-            document,
-            selection: {
-                active: new vscode.Position(0, 0),
-                isEmpty: true,
-                start: new vscode.Position(0, 0),
-                end: new vscode.Position(0, 0)
-            }
-        } as unknown as vscode.TextEditor;
-
-        // Mock Document Symbols
-        const symbol = new vscode.DocumentSymbol(
-            'TestClass',
-            'detail',
-            vscode.SymbolKind.Class,
-            new vscode.Range(0, 0, 10, 0),
-            new vscode.Range(0, 0, 10, 0)
-        );
-        const method = new vscode.DocumentSymbol(
-            'testMethod',
-            'detail',
-            vscode.SymbolKind.Method,
-            new vscode.Range(1, 0, 5, 0),
-            new vscode.Range(1, 0, 5, 0)
-        );
-        symbol.children = [method];
-
-        // Update mock to return symbols
-        (vscode.commands.executeCommand as sinon.SinonStub).withArgs('vscode.executeDocumentSymbolProvider').resolves([symbol]);
-
-        // Update selection to be inside method
-        editor.selection = {
-            active: new vscode.Position(2, 0)
-        } as any;
-
-        const prompt = await promptGenerator.generatePrompt(repo, editor);
-        assert.ok(prompt.includes('<active_file>'));
-        assert.ok(prompt.includes('Context: Class: TestClass > Method: testMethod'));
+        // Ensure removed sections are NOT present
+        assert.ok(!prompt.includes('<active_file>'));
+        assert.ok(!prompt.includes('<git_diff>'));
     });
 
     test('generatePrompt - with diagnostics', async () => {
