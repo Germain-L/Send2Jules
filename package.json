@@ -2,7 +2,7 @@
     "name": "antigravity-jules-bridge",
     "displayName": "Antigravity Jules Bridge",
     "description": "[Antigravity IDE Only] Asynchronous handoff extension to send current flow to Jules Agent.",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "publisher": "antigravity-jules-bridge",
     "license": "Apache-2.0",
     "repository": {
