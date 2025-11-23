@@ -24,7 +24,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { validatePathInBrainDirectory } from './validators';
-import { CODE_ANALYSIS, GitStatus, PATHS, LOG_PREFIX } from './constants';
+import { CODE_ANALYSIS, GitStatus, PATHS, LOG_PREFIX, VALIDATION } from './constants';
 
 /**
  * Summary of Git repository changes including modified, added, and deleted files.
@@ -61,15 +61,6 @@ export class PromptGenerator {
      * - Last modified time for sorting
      * 
      * @returns Array of conversation contexts sorted by most recent first
-     * 
-     * @example
-     * ```typescript
-     * const contexts = await promptGenerator.getAvailableContexts();
-     * // contexts = [
-     * //   { name: 'abc-123', title: 'Implement Login', path: '/home/user/.gemini/...', time: 1234567890 },
-     * //   { name: 'def-456', title: 'Fix Bug #42', path: '/home/user/.gemini/...', time: 1234567800 }
-     * // ]
-     * ```
      */
     async getAvailableContexts(): Promise<{ name: string; title: string; path: string; time: number }[]> {
         try {
@@ -180,358 +171,131 @@ export class PromptGenerator {
     }
 
     /**
-     * DEPRECATED: Old implementation replaced by optimized version above.
-     * Load all context metadata sequentially (slower).
-     * @private
-     * @deprecated Use Promise.allSettled approach instead
-     */
-    private async OLD_getAvailableContextsSequential() {
-        try {
-            const homeDir = os.homedir();
-            if (!homeDir) return [];
-
-            const brainDir = path.join(homeDir, ...PATHS.BRAIN_PATH_SEGMENTS);
-            try {
-                await fs.access(brainDir);
-            } catch {
-                return [];
-            }
-
-            const entries = await fs.readdir(brainDir, { withFileTypes: true });
-            const dirs = entries.filter(e => e.isDirectory());
-
-            // OLD APPROACH: Sequential loading (N+1 problem)
-            const contexts = await Promise.all(dirs.map(async (d) => {
-                const fullPath = path.join(brainDir, d.name);
-                const stats = await fs.stat(fullPath);
-
-                // Try to read task.md for title
-                let title = d.name; // Default to ID
-                let foundTitle = false;
-
-                try {
-                    const taskPath = path.join(fullPath, 'task.md');
-                    const content = await fs.readFile(taskPath, 'utf-8');
-
-                    // Strategy 1: Look for "Task Name:" in content (if stored in text)
-                    // Strategy 2: Look for the first H1 header
-                    const lines = content.split('\n');
-                    for (const line of lines) {
-                        if (line.startsWith('# ')) {
-                            const candidate = line.substring(2).trim();
-                            if (candidate && candidate.toLowerCase() !== 'tasks') {
-                                title = candidate;
-                                foundTitle = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Strategy 3: If H1 is generic "Tasks", look for sub-headers or active task
-                    if (!foundTitle || title === 'Tasks') {
-                        // Try to find a meaningful sub-task or the first non-checked item
-                        // But for now, let's stick to the implementation plan title if task.md is generic
-                        foundTitle = false;
-                    }
-                } catch {
-                    // Ignore error
-                }
-
-                // Fallback to implementation_plan.md if no title found in task.md
-                if (!foundTitle) {
-                    try {
-                        const planPath = path.join(fullPath, 'implementation_plan.md');
-                        const content = await fs.readFile(planPath, 'utf-8');
-                        const firstLine = content.split('\n')[0];
-                        if (firstLine.startsWith('# ')) {
-                            title = firstLine.substring(2).trim();
-                        } else if (firstLine.startsWith('#')) {
-                            title = firstLine.substring(1).trim();
-                        }
-                    } catch {
-                        // Ignore error
-                    }
-                }
-
-                return {
-                    name: d.name,
-                    title: title,
-                    path: fullPath,
-                    time: stats.mtimeMs
-                };
-            }));
-
-            return contexts.sort((a, b) => b.time - a.time);
-        } catch (error) {
-            this.outputChannel.appendLine(`Error listing contexts: ${error}`);
-            return [];
-        }
-    }
-
-    /**
      * Generate an intelligent prompt based on current workspace context.
      * 
      * This is the main entry point that combines multiple context sources:
      * 1. Git diff analysis (what files are being worked on)
-     * 2. Cursor/selection context (where the user is currently editing)
-     * 3. Open files and Antigravity artifacts (task.md, implementation_plan.md)
+     * 2. Active errors (diagnostics)
+     * 3. Cursor/selection context (where the user is currently editing)
+     * 4. Open files and Antigravity artifacts (task.md, implementation_plan.md)
      * 
-     * The generated prompt provides Jules with rich context about the current work state.
+     * The generated prompt uses an XML structure to provide clear context to Jules.
      * 
      * @param repo - Git repository object for diff analysis
      * @param activeEditor - Currently active text editor (optional)
      * @param contextPath - Specific conversation context path to use (optional, defaults to latest)
      * @returns Generated prompt string ready for Jules API
-     * 
-     * @example
-     * ```typescript
-     * const prompt = await promptGenerator.generatePrompt(
-     *   repository,
-     *   vscode.window.activeTextEditor,
-     *   '/home/user/.gemini/antigravity/brain/abc-123'
-     * );
-     * // prompt might be:
-     * // "Working on:
-     * //  Modified: auth.ts, login.tsx
-     * //  
-     * //  Working on function "handleLogin" in auth.ts
-     * //  
-     * //  --- CURRENT TASK CHECKLIST ---
-     * //  - [x] Implement login form..."
-     * ```
      */
     async generatePrompt(repo: Repository, activeEditor?: vscode.TextEditor, contextPath?: string): Promise<string> {
         try {
-            const parts: string[] = [];
+            // Execute context gathering in parallel
+            const [diff, errors, symbols, artifacts] = await Promise.all([
+                this.getUnifiedDiff(repo),
+                this.getDiagnostics(),
+                activeEditor ? this.getDeepSymbolContext(activeEditor) : Promise.resolve(null),
+                this.getOpenFilesContext(contextPath)
+            ]);
 
-            // 1. Analyze git diff for uncommitted changes
-            const diffSummary = this.getGitDiffSummary(repo);
-            if (diffSummary.totalChanges > 0) {
-                parts.push(this.formatDiffContext(diffSummary));
-            }
-
-            // 2. Get cursor context from active editor
-            if (activeEditor) {
-                const cursorContext = this.getCursorContext(activeEditor);
-                if (cursorContext) {
-                    parts.push(cursorContext);
-                }
-            }
-
-            // 3. Collect open files and artifact content
-            // If contextPath is provided, use it. Otherwise, it will default to auto-discovery.
-            const openFilesContext = await this.getOpenFilesContext(contextPath);
-            if (openFilesContext) {
-                parts.push(openFilesContext);
-            }
-
-            // 4. Generate final prompt
-            if (parts.length === 0) {
-                return "Continue working on this project";
-            }
-
-            return parts.join('\n\n');
+            // Assemble XML parts
+            return this.assemblePrompt(diff, errors, symbols, artifacts, activeEditor);
         } catch (error) {
             this.outputChannel.appendLine(`Error generating prompt: ${error}`);
-            return "Continue working on this project";
+            return `<instruction>Continue working on this project</instruction>
+<workspace_context>
+</workspace_context>
+<mission_brief>[Describe your task here...]</mission_brief>`;
         }
     }
 
     /**
-     * Analyze git diff to extract changed files from working tree and index.
-     * 
-     * Categorizes changes into:
-     * - Modified: Existing files that have been changed
-     * - Added: New files that have been created
-     * - Deleted: Files that have been removed
-     * 
-     * @param repo - Git repository object
-     * @returns DiffSummary containing categorized file changes
-     * @private
+     * Get unified diff content for staged and unstaged changes.
+     * Iterates through changed files and reads their current content.
      */
-    private getGitDiffSummary(repo: Repository): DiffSummary {
-        const modifiedFiles: string[] = [];
-        const addedFiles: string[] = [];
-        const deletedFiles: string[] = [];
+    private async getUnifiedDiff(repo: Repository): Promise<string> {
+        const changes = [...repo.state.workingTreeChanges, ...repo.state.indexChanges];
+        if (changes.length === 0) return '';
 
-        // Combine working tree and index changes
-        const allChanges = [...repo.state.workingTreeChanges, ...repo.state.indexChanges];
-
-        for (const change of allChanges) {
-            const fileName = this.getFileName(change.uri);
-
-            // Determine change type based on status
-            const status = change.status;
-
-            if (status === GitStatus.DELETED || status === GitStatus.TYPE_CHANGE) {
-                if (!deletedFiles.includes(fileName)) {
-                    deletedFiles.push(fileName);
-                }
-            } else if (status === GitStatus.INDEX_ADDED || status === GitStatus.UNTRACKED) {
-                if (!addedFiles.includes(fileName)) {
-                    addedFiles.push(fileName);
-                }
-            } else {
-                if (!modifiedFiles.includes(fileName)) {
-                    modifiedFiles.push(fileName);
-                }
-            }
-        }
-
-        return {
-            modifiedFiles,
-            addedFiles,
-            deletedFiles,
-            totalChanges: modifiedFiles.length + addedFiles.length + deletedFiles.length
-        };
-    }
-
-    /**
-     * Format diff summary into natural language for the prompt.
-     * 
-     * Converts the structured DiffSummary into human-readable text like:
-     * "Working on:
-     *  Modified: file1.ts, file2.ts
-     *  Added: newfile.ts"
-     * 
-     * @param diff - DiffSummary object with categorized changes
-     * @returns Formatted string describing the changes
-     * @private
-     */
-    private formatDiffContext(diff: DiffSummary): string {
         const parts: string[] = [];
+        const processedFiles = new Set<string>();
 
-        if (diff.modifiedFiles.length > 0) {
-            parts.push(`Modified: ${diff.modifiedFiles.join(', ')}`);
-        }
-        if (diff.addedFiles.length > 0) {
-            parts.push(`Added: ${diff.addedFiles.join(', ')}`);
-        }
-        if (diff.deletedFiles.length > 0) {
-            parts.push(`Deleted: ${diff.deletedFiles.join(', ')}`);
-        }
+        for (const change of changes) {
+            const fileName = this.getFileName(change.uri);
+            if (processedFiles.has(fileName)) continue;
+            processedFiles.add(fileName);
 
-        if (parts.length === 0) {
-            return 'Continue working on uncommitted changes';
-        }
-
-        return `Working on:\n${parts.join('\n')}`;
-    }
-
-    /**
-     * Get context around cursor position in active editor.
-     * 
-     * Analyzes:
-     * - Selected text (if any)
-     * - Current line number
-     * - Symbol context (function/class the cursor is in)
-     * - File name
-     * 
-     * @param editor - Active text editor
-     * @returns Context string or null if no meaningful context found
-     * @private
-     */
-    private getCursorContext(editor: vscode.TextEditor): string | null {
-        try {
-            const document = editor.document;
-            const position = editor.selection.active;
-            const fileName = this.getFileName(document.uri);
-
-            // Get selected text if any
-            if (!editor.selection.isEmpty) {
-                const selectedText = document.getText(editor.selection);
-                const lineCount = editor.selection.end.line - editor.selection.start.line + 1;
-                return `Reviewing ${lineCount} line(s) in ${fileName} at line ${position.line + 1}`;
-            }
-
-            // Get current line context
-            const line = document.lineAt(position.line);
-            const lineText = line.text.trim();
-
-            // Detect if cursor is in a function/class
-            const symbolContext = this.detectSymbolContext(document, position);
-            if (symbolContext) {
-                return `Working on ${symbolContext} in ${fileName}`;
-            }
-
-            // Fallback: just mention the file and line
-            if (lineText.length > 0) {
-                return `Editing ${fileName} at line ${position.line + 1}`;
-            }
-
-            return `Editing ${fileName}`;
-        } catch (error) {
-            this.outputChannel.appendLine(`Error getting cursor context: ${error}`);
-            return null;
-        }
-    }
-
-    /**
-     * Detect if cursor is inside a function or class definition.
-     * 
-     * Uses regex patterns to match common function/class declarations in:
-     * - TypeScript/JavaScript (function, const/let/var arrow functions, classes)
-     * - Python (def, class)
-     * 
-     * @param document - Text document to analyze
-     * @param position - Cursor position
-     * @returns Symbol context string (e.g., 'function "handleLogin"') or null
-     * @private
-     */
-    private detectSymbolContext(document: vscode.TextDocument, position: vscode.Position): string | null {
-        try {
-            const text = document.getText();
-            const offset = document.offsetAt(position);
-
-            // Simple regex patterns for common languages
-            const patterns = [
-                // TypeScript/JavaScript: function name(...) or const name = (...) =>
-                /(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)/g,
-                // TypeScript/JavaScript: class name
-                /class\s+(\w+)/g,
-                // Python: def name(...):
-                /def\s+(\w+)/g,
-                // Python: class name:
-                /class\s+(\w+)/g,
-            ];
-
-            for (const pattern of patterns) {
-                let match;
-                while ((match = pattern.exec(text)) !== null) {
-                    const matchStart = match.index;
-                    const matchEnd = pattern.lastIndex;
-
-                    // Within symbol context radius
-                    if (matchStart <= offset && offset <= matchEnd + CODE_ANALYSIS.SYMBOL_CONTEXT_RADIUS) {
-                        const name = match[1] || match[2];
-                        if (name) {
-                            // Determine if it's a function or class
-                            const matchText = match[0];
-                            if (matchText.includes('class')) {
-                                return `class "${name}"`;
-                            } else {
-                                return `function "${name}"`;
-                            }
-                        }
-                    }
+            try {
+                // Spec: "For each file, read its current text content."
+                const document = await vscode.workspace.openTextDocument(change.uri);
+                const content = document.getText();
+                parts.push(`--- ${fileName} ---\n${content}`);
+            } catch (e) {
+                // Handle deleted files or errors
+                if (change.status === GitStatus.DELETED || change.status === GitStatus.INDEX_DELETED) {
+                    parts.push(`--- ${fileName} ---\n[DELETED]`);
                 }
             }
+        }
+        return parts.join('\n\n');
+    }
 
-            return null;
-        } catch (error) {
+    /**
+     * Get deep symbol context using LSP.
+     * Returns a breadcrumb string: "Class: UserManager > Method: validateSession"
+     */
+    private async getDeepSymbolContext(editor: vscode.TextEditor): Promise<string | null> {
+        try {
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                'vscode.executeDocumentSymbolProvider',
+                editor.document.uri
+            );
+
+            if (!symbols || symbols.length === 0) return null;
+
+            const position = editor.selection.active;
+            return this.findDeepestSymbol(symbols, position);
+        } catch (e) {
             return null;
         }
+    }
+
+    private findDeepestSymbol(symbols: vscode.DocumentSymbol[], position: vscode.Position, parentChain: string[] = []): string | null {
+        for (const symbol of symbols) {
+            if (symbol.range.contains(position)) {
+                const kindName = vscode.SymbolKind[symbol.kind];
+                const name = symbol.name;
+                const currentChain = [...parentChain, `${kindName}: ${name}`];
+
+                if (symbol.children && symbol.children.length > 0) {
+                    const childResult = this.findDeepestSymbol(symbol.children, position, currentChain);
+                    if (childResult) return childResult;
+                }
+                return currentChain.join(' > ');
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get active diagnostics (errors).
+     */
+    private async getDiagnostics(): Promise<string | null> {
+        const diagnostics = vscode.languages.getDiagnostics();
+        const errors: string[] = [];
+
+        for (const [uri, diags] of diagnostics) {
+            for (const diag of diags) {
+                if (diag.severity === vscode.DiagnosticSeverity.Error) {
+                    const fileName = this.getFileName(uri);
+                    errors.push(`File: ${fileName} Line ${diag.range.start.line + 1}: ${diag.message}`);
+                }
+            }
+        }
+
+        return errors.length > 0 ? errors.join('\n') : null;
     }
 
     /**
      * Check if a URI points to an Antigravity artifact file.
-     * 
-     * Artifact files are stored in `~/.gemini/antigravity/brain/<conversation_id>/`
-     * and include task.md and implementation_plan.md.
-     * 
-     * @param uri - File URI to check
-     * @returns True if the file is an artifact
-     * @private
      */
     private isArtifactFile(uri: vscode.Uri): boolean {
         const filePath = uri.fsPath;
@@ -544,14 +308,6 @@ export class PromptGenerator {
 
     /**
      * Read and format artifact file content with a header.
-     * 
-     * Reads the content of task.md or implementation_plan.md and formats it
-     * with a clear header for inclusion in the prompt.
-     * 
-     * @param uri - URI of the artifact file
-     * @param fileName - Name of the file (task.md or implementation_plan.md)
-     * @returns Formatted content string or null if file is empty/unreadable
-     * @private
      */
     private async readArtifactFile(uri: vscode.Uri, fileName: string): Promise<string | null> {
         try {
@@ -562,7 +318,6 @@ export class PromptGenerator {
                 return null;
             }
 
-            // Format with clear header
             const header = fileName === 'task.md' ? 'CURRENT TASK CHECKLIST' : 'IMPLEMENTATION PLAN';
             return `--- ${header} ---\n${content.trim()}`;
         } catch (error) {
@@ -573,17 +328,6 @@ export class PromptGenerator {
 
     /**
      * Get list of open files and include artifact content.
-     * 
-     * Processes all open tabs to:
-     * 1. Identify and read Antigravity artifact files (task.md, implementation_plan.md)
-     * 2. List regular open files
-     * 3. Search filesystem for artifacts if not already open
-     * 
-     * Artifacts from the selected conversation context are prioritized.
-     * 
-     * @param specificContextPath - Optional path to specific conversation context
-     * @returns Formatted string with artifacts and file list, or null if none found
-     * @private
      */
     private async getOpenFilesContext(specificContextPath?: string): Promise<string | null> {
         try {
@@ -591,7 +335,6 @@ export class PromptGenerator {
             const regularFiles: string[] = [];
             const processedArtifactPaths = new Set<string>();
 
-            // Collect all open tabs with their URIs
             const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
 
             for (const tab of tabs) {
@@ -600,9 +343,7 @@ export class PromptGenerator {
                     const fileName = this.getFileName(uri);
                     const fullPath = uri.fsPath;
 
-                    // Check if this is an Antigravity artifact
                     if (this.isArtifactFile(uri)) {
-                        // If a specific context is requested, only include artifacts from that path
                         if (specificContextPath && !fullPath.startsWith(specificContextPath)) {
                             continue;
                         }
@@ -618,7 +359,6 @@ export class PromptGenerator {
                 }
             }
 
-            // Search for artifacts in the specified context or default location
             const filesystemArtifacts = await this.findArtifactFiles(specificContextPath);
             for (const artifact of filesystemArtifacts) {
                 if (!processedArtifactPaths.has(artifact.path)) {
@@ -628,12 +368,10 @@ export class PromptGenerator {
 
             const parts: string[] = [];
 
-            // Include artifact content first (most important)
             if (artifactContent.length > 0) {
                 parts.push(...artifactContent);
             }
 
-            // Include regular files list
             if (regularFiles.length > 0) {
                 const fileList = regularFiles.slice(0, CODE_ANALYSIS.MAX_FILES_IN_PROMPT).join(', ');
                 parts.push(`Other open files: ${fileList}`);
@@ -648,27 +386,17 @@ export class PromptGenerator {
 
     /**
      * Find artifact files in the .gemini directory.
-     * 
-     * Searches for task.md and implementation_plan.md in:
-     * - A specific context path (if provided)
-     * - The most recent conversation context (if no path provided)
-     * 
-     * @param specificContextPath - Optional path to specific conversation context
-     * @returns Array of artifact objects with name, content, and path
-     * @private
      */
     private async findArtifactFiles(specificContextPath?: string): Promise<{ name: string; content: string; path: string }[]> {
         try {
             let targetDir = specificContextPath;
 
-            // If no specific path provided, find the most recent one
             if (!targetDir) {
                 const contexts = await this.getAvailableContexts();
                 if (contexts.length === 0) return [];
                 targetDir = contexts[0].path;
             }
 
-            // SECURITY: Validate that targetDir is within the brain directory
             const homeDir = os.homedir();
             if (!homeDir) {
                 this.outputChannel.appendLine(`${LOG_PREFIX.SECURITY} Could not determine home directory`);
@@ -678,7 +406,6 @@ export class PromptGenerator {
             const brainDir = path.join(homeDir, ...PATHS.BRAIN_PATH_SEGMENTS);
             const resolvedBrainDir = path.resolve(brainDir);
 
-            // SECURITY: Prevent path traversal attacks
             try {
                 validatePathInBrainDirectory(targetDir, resolvedBrainDir);
             } catch (error) {
@@ -691,7 +418,6 @@ export class PromptGenerator {
             for (const fileName of PATHS.ARTIFACTS) {
                 const filePath = path.join(targetDir, fileName);
 
-                // SECURITY: Double-check resolved path is still within brain directory
                 try {
                     validatePathInBrainDirectory(filePath, resolvedBrainDir);
                 } catch (error) {
@@ -707,7 +433,6 @@ export class PromptGenerator {
                         artifacts.push({ name: fileName, content, path: filePath });
                     }
                 } catch (error: any) {
-                    // File doesn't exist or not readable - this is expected, skip
                     if (error.code !== 'ENOENT' && error.code !== 'EACCES') {
                         this.outputChannel.appendLine(`Unexpected error accessing ${fileName}: ${error.code}`);
                     }
@@ -723,15 +448,111 @@ export class PromptGenerator {
 
     /**
      * Extract file name from URI.
-     * 
-     * Cross-platform utility that handles both Windows and Unix path separators.
-     * 
-     * @param uri - File URI
-     * @returns File name (last segment of path)
-     * @private
      */
     private getFileName(uri: vscode.Uri): string {
         const parts = uri.fsPath.split(/[\\/]/);
         return parts[parts.length - 1];
+    }
+
+    /**
+     * Assemble the final prompt XML with budget management.
+     */
+    private assemblePrompt(diff: string, errors: string | null, symbols: string | null, artifacts: string | null, activeEditor?: vscode.TextEditor): string {
+        const instruction = "You are an expert software engineer. Analyze the workspace context and complete the mission brief.";
+        const missionBriefPlaceholder = "[Describe your task here...]";
+
+        const maxLen = VALIDATION.PROMPT_MAX_LENGTH;
+
+        const baseStart = `<instruction>${instruction}</instruction>\n<workspace_context>\n`;
+        const baseEnd = `</workspace_context>\n<mission_brief>${missionBriefPlaceholder}</mission_brief>`;
+
+        // Calculate available budget for context
+        let currentLen = baseStart.length + baseEnd.length;
+        let remainingBudget = maxLen - currentLen;
+
+        // 2. Active File & Cursor
+        let activeFileStr = "";
+        if (activeEditor) {
+            const fileName = this.getFileName(activeEditor.document.uri);
+            const cursorLine = activeEditor.selection.active.line + 1;
+            const fileContent = activeEditor.document.getText();
+
+            let contextStr = `File: ${fileName}\nCursor Line: ${cursorLine}`;
+            if (symbols) {
+                contextStr += `\nContext: ${symbols}`;
+            }
+            contextStr += `\n\n${fileContent}`;
+
+            activeFileStr = `<active_file>\n${contextStr}\n</active_file>\n`;
+        }
+
+        // 3. Active Errors
+        let activeErrorsStr = "";
+        if (errors) {
+            activeErrorsStr = `<active_errors>\n${errors}\n</active_errors>\n`;
+        }
+
+        // 4. Git Diff
+        let gitDiffStr = "";
+        if (diff) {
+            gitDiffStr = `<git_diff>\n${diff}\n</git_diff>\n`;
+        }
+
+        // 5. Artifacts
+        let artifactsStr = "";
+        if (artifacts) {
+            artifactsStr = `<artifacts>\n${artifacts}\n</artifacts>\n`;
+        }
+
+        // Assemble with priority
+        let finalContext = "";
+
+        // Priority 2: Active File
+        if (activeFileStr.length <= remainingBudget) {
+            finalContext += activeFileStr;
+            remainingBudget -= activeFileStr.length;
+        } else {
+            // Truncate active file if needed
+            const header = activeFileStr.split('\n\n')[0];
+            if (header.length < remainingBudget) {
+                finalContext += header + "\n[Content truncated]\n</active_file>\n";
+                remainingBudget -= (header.length + 30);
+            }
+        }
+
+        // Priority 3: Active Errors
+        if (activeErrorsStr.length <= remainingBudget) {
+            finalContext += activeErrorsStr;
+            remainingBudget -= activeErrorsStr.length;
+        } else {
+            if (remainingBudget > 50) {
+                finalContext += activeErrorsStr.substring(0, remainingBudget - 20) + "...</active_errors>\n";
+                remainingBudget = 0;
+            }
+        }
+
+        // Priority 4: Git Diff
+        if (gitDiffStr.length <= remainingBudget) {
+            finalContext += gitDiffStr;
+            remainingBudget -= gitDiffStr.length;
+        } else {
+            if (remainingBudget > 50) {
+                finalContext += gitDiffStr.substring(0, remainingBudget - 20) + "...</git_diff>\n";
+                remainingBudget = 0;
+            }
+        }
+
+        // Priority 5: Artifacts
+        if (artifactsStr.length <= remainingBudget) {
+            finalContext += artifactsStr;
+            remainingBudget -= artifactsStr.length;
+        } else {
+            if (remainingBudget > 50) {
+                finalContext += artifactsStr.substring(0, remainingBudget - 20) + "...</artifacts>\n";
+                remainingBudget = 0;
+            }
+        }
+
+        return `${baseStart}${finalContext}${baseEnd}`;
     }
 }
